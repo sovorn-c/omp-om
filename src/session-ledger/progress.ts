@@ -252,7 +252,10 @@ export function realTokensSinceAnchor(
 		const delta = currentContextTokens - baseline;
 		return delta >= 0 ? delta : undefined;
 	}
-	return Math.max(0, currentContextTokens);
+	// No coverage marker and no compaction after the boundary: the whole current
+	// context (system prompt, tool schemas) would read as growth and fire every
+	// stage at session start. Callers use the raw source estimate instead.
+	return undefined;
 }
 
 /**

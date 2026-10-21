@@ -220,15 +220,23 @@ describe("session-ledger V3 progress helpers", () => {
 			expect(observedTokensSinceLastCompaction(entries)).toBe(0);
 		});
 
-		it("measures real context growth from the boundary, not from usage before it", () => {
+		it("has no real-growth baseline with no coverage marker after the boundary", () => {
+			// Without a coverage marker the whole context would read as growth
+			// (system prompt and tool schemas included), so callers use the raw estimate.
 			const entries = [
 				rawAssistantWithUsage("a-1", 9000),
 				resetBoundary("rb-1"),
 				textCustomMessage("raw-2", "bbbb"),
 			];
 
-			expect(realTokensSinceAnchor(entries, V3_OBSERVATIONS_RECORDED, 500)).toBe(500);
-			expect(realTokensSinceAnchor(entries, undefined, 500)).toBe(500);
+			expect(realTokensSinceAnchor(entries, V3_OBSERVATIONS_RECORDED, 500)).toBeUndefined();
+			expect(realTokensSinceAnchor(entries, undefined, 500)).toBeUndefined();
+		});
+
+		it("has no real-growth baseline in a session that was never covered", () => {
+			const entries = [textCustomMessage("raw-1", "aaaa")];
+
+			expect(realTokensSinceAnchor(entries, V3_OBSERVATIONS_RECORDED, 23_000)).toBeUndefined();
 		});
 
 		it("does not look past the boundary for a coverage usage baseline", () => {

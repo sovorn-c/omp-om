@@ -295,7 +295,7 @@ function realTokensSinceAnchor(entries, customType, currentContextTokens) {
     const delta = currentContextTokens - baseline;
     return delta >= 0 ? delta : void 0;
   }
-  return Math.max(0, currentContextTokens);
+  return void 0;
 }
 function compactionRangeStartIndex(entries) {
   const floor = resetBoundaryIndex(entries) + 1;
@@ -2897,6 +2897,7 @@ function debugSessionMetadata(ctx) {
   }
 }
 function maybeLaunchConsolidation(pi, runtime, ctx) {
+  if (ctx.agent?.kind === "sub") return void 0;
   runtime.ensureConfig(ctx.cwd);
   if (runtime.config.passive === true) return void 0;
   if (runtime.consolidationInFlight) return void 0;

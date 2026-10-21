@@ -11,7 +11,7 @@ A bad file never throws. A file that is not valid JSON, or not a JSON object, is
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `model` | `"@smol"` | The one memory model for observer, reflector and dropper. Any spec omp's `ctx.models.resolve` accepts: `provider/id`, a bare id, or a role alias like `@smol`. Must be a non-empty string. Only available (authenticated) models resolve. |
-| `observeAfterTokens` | `10000` | Observation runs when uncovered source reaches this many tokens. Progress is the larger of the raw uncovered estimate and the provider-reported context growth since the last record. |
+| `observeAfterTokens` | `10000` | Observation runs when uncovered source reaches this many tokens. Progress is the larger of the raw uncovered estimate and the provider-reported context growth since the last record. Until the first record (or a compaction) exists there is no growth baseline, so only the raw source estimate counts; omp's system prompt and tool schemas do not make a new session due. |
 | `reflectAfterTokens` | `20000` | Same, for reflection runs, counted over observed tokens. |
 | `observationsPoolMaxTokens` | `20000` | Active observation budget. When the observations folded at compaction reach it, the compaction is a *full fold* (see below). |
 | `observationsPoolTargetTokens` | half of max | Target the dropper trims toward. Ignored if not smaller than max. |
@@ -31,6 +31,8 @@ Worker thinking level is fixed at `low`. The 20 second hook deadline is a consta
 Keys removed from Pi OM, ignored with a warning: `compactAfterTokens`, `compactAfterTokensMode`, `compactAfterTokensRatio`, `consolidateWhenIdle`, `fallbackModel`. omp's own threshold (for example `compaction.thresholdTokens`) decides when compaction fires. omp-om has no `agent_settled` trigger.
 
 Keep `observeAfterTokens` < `reflectAfterTokens` < omp's compaction threshold, so the ledger is ahead of the cut when omp compacts.
+
+Subagent sessions (omp rebinds extensions into every task subagent; `ctx.agent.kind === "sub"`) never run the background workers. The main session's ledger is the only one that is observed, reflected and dropped. The compaction hook still runs if a subagent session compacts. This follows omp's extension types and the unit tests; it was not exercised live.
 
 ## What the compaction summary contains
 

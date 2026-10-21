@@ -36,6 +36,8 @@ type ResolvedModel = Extract<ResolveResult, { ok: true }>;
 
 type ConsolidationCtx = {
 	cwd: string;
+	/** omp: `"sub"` for subagent sessions, which never run the workers. */
+	agent?: { kind: "main" | "sub" };
 	hasUI: boolean;
 	ui?: { notify: (message: string, type?: "warning" | "info" | "error") => void };
 	models?: { resolve(spec: string): unknown };
@@ -214,6 +216,7 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 
 /** Launch a consolidation run when any stage is due. Returns its promise, or undefined when nothing launched. */
 function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): Promise<void> | undefined {
+	if (ctx.agent?.kind === "sub") return undefined;
 	runtime.ensureConfig(ctx.cwd);
 	if (runtime.config.passive === true) return undefined;
 	if (runtime.consolidationInFlight) return undefined;

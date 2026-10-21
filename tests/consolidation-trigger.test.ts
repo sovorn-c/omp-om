@@ -241,6 +241,40 @@ describe("V3 consolidation trigger", () => {
 		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
+	it("does not launch at session start when only the system prompt fills the context", () => {
+		// No coverage marker yet: provider-reported context (system prompt, tool
+		// schemas) must not count as growth, only the tiny raw source does.
+		const entries = [textCustomMessage("raw-1", "aaaa")];
+		const { fireAgentStart, fireTurnEnd, runtime, ctx } = setup({ entries, observeAfterTokens: 5, reflectAfterTokens: 10 });
+		(ctx as any).getContextUsage = () => ({ tokens: 23_000, contextWindow: 200_000 });
+
+		fireAgentStart();
+		fireTurnEnd();
+
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
+	});
+
+	it("does not launch in subagent sessions", () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fireAgentStart, fireTurnEnd, runtime, ctx } = setup({ entries });
+		(ctx as any).agent = { kind: "sub", id: "0-Explore", name: "explore", depth: 1 };
+
+		fireAgentStart();
+		fireTurnEnd();
+
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
+	});
+
+	it("still launches in the main agent session", () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fireTurnEnd, runtime, ctx } = setup({ entries });
+		(ctx as any).agent = { kind: "main", id: "Main", name: "main", depth: 0 };
+
+		fireTurnEnd();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+	});
+
 	it("launches from agent_start when work is due", () => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const { fireAgentStart, runtime } = setup({ entries });
