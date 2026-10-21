@@ -1,5 +1,5 @@
-import type { AgentContext, AgentLoopConfig, AgentTool } from "@earendil-works/pi-agent-core";
-import { agentLoop, type WorkerAgentLoop } from "../agent-loop.js";
+import type { AgentLoopConfig, AgentTool } from "@earendil-works/pi-agent-core";
+import { agentLoop, type WorkerAgentContext, type WorkerAgentLoop } from "../agent-loop.js";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
@@ -182,8 +182,9 @@ ${conversation}`;
 		},
 	];
 
-	const context: AgentContext = {
-		messages: [{ role: "system", content: OBSERVER_SYSTEM, timestamp: Date.now() }],
+	const context: WorkerAgentContext = {
+		systemPrompt: [OBSERVER_SYSTEM],
+		messages: [],
 		tools: [recordObservations as AgentTool<any>],
 	};
 

@@ -96,7 +96,8 @@ describe("V3 reflector agent", () => {
 	it("keeps core reflector prompt guidance in V3 terms", async () => {
 		let systemPrompt = "";
 		const loop = fakeAgentLoop((_prompts, context) => {
-			systemPrompt = context.messages[0]?.role === "system" ? context.messages[0].content : "";
+			systemPrompt = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n") : "";
+			expect(context.messages.some((message: { role?: string }) => message.role === "system")).toBe(false);
 		});
 
 		await runReflector({ ...baseArgs, agentLoop: loop });

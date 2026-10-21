@@ -1,5 +1,5 @@
-import type { AgentContext, AgentLoopConfig, AgentTool } from "@earendil-works/pi-agent-core";
-import { agentLoop, type WorkerAgentLoop } from "../agent-loop.js";
+import type { AgentLoopConfig, AgentTool } from "@earendil-works/pi-agent-core";
+import { agentLoop, type WorkerAgentContext, type WorkerAgentLoop } from "../agent-loop.js";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
@@ -179,8 +179,9 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 
 	const userText = `CURRENT REFLECTIONS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\nCURRENT OBSERVATIONS:\n${joinOrEmpty(observations.map((observation) => observationToReflectorLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nCrystallize any missing durable facts or patterns into new reflections. If nothing is stable enough, do not call the tool.`;
 	const prompts: Message[] = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
-	const context: AgentContext = {
-		messages: [{ role: "system", content: REFLECTOR_SYSTEM, timestamp: Date.now() }],
+	const context: WorkerAgentContext = {
+		systemPrompt: [REFLECTOR_SYSTEM],
+		messages: [],
 		tools: [recordReflections as AgentTool<any>],
 	};
 	const reasoning = (model as { reasoning?: unknown }).reasoning;

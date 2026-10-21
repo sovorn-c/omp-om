@@ -1784,7 +1784,8 @@ ${conversation}`;
     }
   ];
   const context = {
-    messages: [{ role: "system", content: OBSERVER_SYSTEM, timestamp: Date.now() }],
+    systemPrompt: [OBSERVER_SYSTEM],
+    messages: [],
     tools: [recordObservations]
   };
   const reasoning = model.reasoning;
@@ -2451,7 +2452,8 @@ Maximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation$
 This maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
   const prompts = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
   const context = {
-    messages: [{ role: "system", content: DROPPER_SYSTEM, timestamp: Date.now() }],
+    systemPrompt: [DROPPER_SYSTEM],
+    messages: [],
     tools: [dropObservations]
   };
   const reasoning = model.reasoning;
@@ -2718,7 +2720,8 @@ ${joinOrEmpty3(observations.map((observation) => observationToReflectorLine(obse
 Crystallize any missing durable facts or patterns into new reflections. If nothing is stable enough, do not call the tool.`;
   const prompts = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
   const context = {
-    messages: [{ role: "system", content: REFLECTOR_SYSTEM, timestamp: Date.now() }],
+    systemPrompt: [REFLECTOR_SYSTEM],
+    messages: [],
     tools: [recordReflections]
   };
   const reasoning = model.reasoning;
