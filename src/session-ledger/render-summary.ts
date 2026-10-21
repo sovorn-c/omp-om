@@ -1,4 +1,6 @@
-import type { Observation, Reflection } from "./types.js";
+import { entryIndexForId, isSourceEntry, unobservedSourceSpanBefore, type UnobservedSourceSpan } from "./progress.js";
+import { buildCompactionProjection } from "./projection.js";
+import type { Entry, Observation, Reflection } from "./types.js";
 
 const CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in this session.
 
@@ -109,4 +111,159 @@ export function renderSummaryWithBudget(
 
 export function renderSummary(reflections: Reflection[], observations: Observation[], options: RenderSummaryOptions = {}): string {
 	return renderSummaryWithBudget(reflections, observations, options).text;
+}
+
+/** Fixed model-free fallback text used when no memory record exists. */
+export const NO_MEMORY_NOTICE =
+	"No observational memory was recorded for this session before this compaction; the earlier context is not summarized.";
+
+const FALLBACK_HEADER = "Observational memory (model-free fallback summary; no memory model was used).";
+const EXCERPT_MAX_CHARS = 200;
+/** Share of the space left after the fixed text that unobserved excerpts may take. */
+const FALLBACK_EXCERPT_SHARE = 0.4;
+const OMITTED_EXCERPTS_NOTE_TOKENS = 12;
+/** Records are never truncated below this many tokens unless the whole section budget is smaller. */
+const MIN_TRUNCATED_RECORD_TOKENS = 16;
+
+export function describeUnobservedSpan(span: UnobservedSourceSpan): string {
+	return `${span.entryCount} source entr${span.entryCount === 1 ? "y" : "ies"} (~${span.tokens.toLocaleString()} tokens)`;
+}
+
+/** Cost of one block in a `\n\n`-joined summary. */
+function blockTokens(text: string): number {
+	return estimateTokens(text) + 1;
+}
+
+function truncateToTokens(text: string, tokens: number): string {
+	if (estimateTokens(text) <= tokens) return text;
+	return `${text.slice(0, Math.max(0, tokens * 4 - 1)).trimEnd()}…`;
+}
+
+/**
+ * Newest-first selection of record lines that fit `budget`, returned in original
+ * order. A line is first capped at half the budget so one oversized record is
+ * truncated into the summary instead of crowding out, or being dropped for,
+ * the rest.
+ */
+function selectTruncatedLines<T>(records: T[], line: (record: T) => string, budget: number): { lines: string[]; tokens: number } {
+	const cap = Math.min(budget, Math.max(MIN_TRUNCATED_RECORD_TOKENS, Math.floor(budget / 2)));
+	const picked: string[] = [];
+	let tokens = 0;
+	if (cap <= 0) return { lines: picked, tokens };
+	for (let i = records.length - 1; i >= 0; i--) {
+		const text = truncateToTokens(line(records[i]), cap);
+		const cost = blockTokens(text);
+		if (tokens + cost > budget) continue;
+		tokens += cost;
+		picked.push(text);
+	}
+	return { lines: picked.reverse(), tokens };
+}
+
+function textOfContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	const texts: string[] = [];
+	for (const block of content) {
+		if (typeof block === "object" && block !== null && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") {
+			texts.push(block.text);
+		}
+	}
+	return texts.join(" ");
+}
+
+/** Human-authored text of a source entry (user message, custom message, branch summary), or undefined. */
+function entryExcerptSource(entry: Entry): string | undefined {
+	if (entry.type === "message") {
+		const message = entry.message;
+		if (typeof message === "object" && message !== null && "role" in message && message.role === "user" && "content" in message) {
+			return textOfContent(message.content);
+		}
+		return undefined;
+	}
+	if (entry.type === "custom_message") return textOfContent(entry.content);
+	if (entry.type === "branch_summary") return typeof entry.summary === "string" ? entry.summary : undefined;
+	return undefined;
+}
+
+function excerptOf(text: string): string {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length > EXCERPT_MAX_CHARS ? `${flat.slice(0, EXCERPT_MAX_CHARS).trimEnd()}…` : flat;
+}
+
+function pickNewestExcerpts(lines: string[], budget: number): string[] {
+	const picked: string[] = [];
+	let tokens = 0;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const cost = estimateTokens(lines[i]) + 1;
+		if (tokens + cost > budget) break;
+		tokens += cost;
+		picked.push(lines[i]);
+	}
+	return picked.reverse();
+}
+
+export type FallbackSummaryOptions = {
+	/** Estimated token budget for the whole summary; it is never exceeded. */
+	maxTokens: number;
+	/** Observation pool threshold forwarded to the projection, matching the compaction `details`. Unbounded when omitted. */
+	observationsPoolMaxTokens?: number;
+};
+
+/**
+ * Deterministic summary built without a model, for compactions that cannot
+ * keep the unobserved source in context. Ledger records come first (newest
+ * first within budget, each truncated if oversized), then a notice counting the
+ * source entries before `foldThroughEntryId` that no memory record describes,
+ * with a short excerpt of each human-authored one. An empty ledger yields
+ * {@link NO_MEMORY_NOTICE} in place of the records.
+ */
+export function renderFallbackSummary(entries: Entry[], foldThroughEntryId: string, opts: FallbackSummaryOptions): string {
+	const projection = buildCompactionProjection(entries, foldThroughEntryId, {
+		observationsPoolMaxTokens: opts.observationsPoolMaxTokens ?? Number.POSITIVE_INFINITY,
+	});
+	const foldIndex = entryIndexForId(entries, foldThroughEntryId);
+	const gap = foldIndex === -1 ? undefined : unobservedSourceSpanBefore(entries, foldIndex);
+	const hasLedger = projection.reflections.length + projection.observations.length > 0;
+
+	let budget = opts.maxTokens - blockTokens(FALLBACK_HEADER);
+	if (!hasLedger) budget -= blockTokens(NO_MEMORY_NOTICE);
+
+	let unobserved: string[] = [];
+	if (gap) {
+		const notice = `${describeUnobservedSpan(gap)} before this point were never observed, so no memory record describes them and they are no longer in context.`;
+		budget -= blockTokens(notice);
+		const candidates: string[] = [];
+		for (let i = gap.firstIndex; i <= gap.lastIndex; i++) {
+			if (!isSourceEntry(entries[i])) continue;
+			const text = excerptOf(entryExcerptSource(entries[i]) ?? "");
+			if (text) candidates.push(`- ${text}`);
+		}
+		const excerptBudget = Math.floor(Math.max(0, budget) * FALLBACK_EXCERPT_SHARE);
+		let excerpts = pickNewestExcerpts(candidates, excerptBudget);
+		if (excerpts.length < candidates.length) excerpts = pickNewestExcerpts(candidates, excerptBudget - OMITTED_EXCERPTS_NOTE_TOKENS);
+		const lines = [notice];
+		if (excerpts.length > 0) lines.push(`Excerpts of the unobserved input:\n${excerpts.join("\n")}`);
+		if (excerpts.length < candidates.length) {
+			const omitted = candidates.length - excerpts.length;
+			lines.push(`(${omitted} more unobserved input${omitted === 1 ? "" : "s"} not shown.)`);
+		}
+		unobserved = lines;
+		budget -= blockTokens(lines.slice(1).join("\n"));
+	}
+
+	const parts: string[] = [FALLBACK_HEADER];
+	if (hasLedger) {
+		const sectionBudget = Math.max(0, budget - blockTokens("## Reflections") - blockTokens("## Observations"));
+		const reserved = selectTruncatedLines(projection.observations, observationToSummaryLine, Math.floor(sectionBudget * SUMMARY_OBSERVATIONS_MIN_SHARE));
+		const reflectionLines = selectTruncatedLines(projection.reflections, reflectionToSummaryLine, sectionBudget - reserved.tokens);
+		const observationLines = selectTruncatedLines(projection.observations, observationToSummaryLine, sectionBudget - reflectionLines.tokens);
+		if (reflectionLines.lines.length > 0) parts.push(`## Reflections\n${reflectionLines.lines.join("\n")}`);
+		if (observationLines.lines.length > 0) parts.push(`## Observations\n${observationLines.lines.join("\n")}`);
+	} else {
+		parts.push(NO_MEMORY_NOTICE);
+	}
+	parts.push(...unobserved);
+
+	return truncateToTokens(parts.join("\n\n"), opts.maxTokens);
 }

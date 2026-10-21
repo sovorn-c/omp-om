@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { renderSummary, renderSummaryWithBudget } from "../src/session-ledger/index.js";
-import { observation, reflection } from "./fixtures/session.js";
+import { renderFallbackSummary, renderSummary, renderSummaryWithBudget } from "../src/session-ledger/index.js";
+import { observation, observationsRecordedEntry, rawMessage, reflection } from "./fixtures/session.js";
 
 describe("session-ledger V3 summary rendering", () => {
 	it("renders empty memory as an empty summary", () => {
@@ -118,5 +118,67 @@ describe("oversized newest record (PR #81 review, issue 3)", () => {
 		expect(rendered.observations.map((obs) => obs.id)).toEqual(["a1aaaaaaaaaa"]);
 		expect(rendered.text).toContain("[a1aaaaaaaaaa] ");
 		expect(rendered.text).toContain("Short older fact.");
+	});
+});
+
+describe("renderFallbackSummary", () => {
+	const coverage = (id: string, coversUpToId: string, records: ReturnType<typeof observation>[]) =>
+		observationsRecordedEntry(id, { observations: records, coversUpToId });
+	const estimate = (text: string) => Math.ceil(text.length / 4);
+
+	it("truncates a single record over budget into a non-empty summary", () => {
+		const huge = observation("dddddddddddd", { content: "x".repeat(8000) });
+		const entries = [rawMessage("u0", "hello"), coverage("om-0", "u0", [huge]), rawMessage("u1", "next")];
+
+		const summary = renderFallbackSummary(entries, "u1", { maxTokens: 500 });
+
+		expect(summary.length).toBeGreaterThan(0);
+		expect(summary).toContain("[dddddddddddd]");
+		expect(summary).toContain("…");
+		expect(estimate(summary)).toBeLessThanOrEqual(500);
+	});
+
+	it("renders a fixed no-memory notice when the ledger is empty", () => {
+		const entries = [rawMessage("u0", "hello"), rawMessage("u1", "next")];
+
+		const summary = renderFallbackSummary(entries, "u1", { maxTokens: 500 });
+
+		expect(summary).toContain("No observational memory was recorded");
+		expect(summary).not.toContain("## Observations");
+	});
+
+	it("lists unobserved source with a count, approximate tokens and user-message excerpts", () => {
+		const obs = observation("aaaaaaaaaaaa", { content: "Observed fact." });
+		const entries = [
+			rawMessage("u0", "first request"),
+			coverage("om-0", "u0", [obs]),
+			rawMessage("u1", "please refactor the parser module"),
+			rawMessage("u2", "y".repeat(1000)),
+			rawMessage("u3", "kept tail"),
+		];
+
+		const summary = renderFallbackSummary(entries, "u3", { maxTokens: 800 });
+
+		expect(summary).toContain("[aaaaaaaaaaaa]");
+		expect(summary).toMatch(/2 source entries \(~\d+ tokens\)/);
+		expect(summary).toContain("please refactor the parser module");
+		expect(summary).not.toContain("y".repeat(300));
+		expect(summary.indexOf("[aaaaaaaaaaaa]")).toBeLessThan(summary.indexOf("please refactor"));
+		expect(estimate(summary)).toBeLessThanOrEqual(800);
+	});
+
+	it("is deterministic and stays within a small budget", () => {
+		const entries = [
+			rawMessage("u0", "z".repeat(4000)),
+			coverage("om-0", "u0", [observation("aaaaaaaaaaaa", { content: "w".repeat(2000) })]),
+			rawMessage("u1", "v".repeat(4000)),
+			rawMessage("u2", "end"),
+		];
+
+		const first = renderFallbackSummary(entries, "u2", { maxTokens: 120 });
+
+		expect(renderFallbackSummary(entries, "u2", { maxTokens: 120 })).toBe(first);
+		expect(estimate(first)).toBeLessThanOrEqual(120);
+		expect(first.length).toBeGreaterThan(0);
 	});
 });

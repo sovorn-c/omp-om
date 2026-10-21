@@ -136,28 +136,31 @@ describe("compaction hook when the observer is behind Pi's cut", () => {
 		);
 	});
 
-	it("delegates to Pi's native summarizer when retaining the tail exceeds the budget", async () => {
+	it("falls back to Pi's cut with a model-free summary naming the unobserved span when retaining the tail exceeds the budget", async () => {
 		const { run, ctx } = setup({ entries: laggingBranch(), compactionMaxRetainedTokens: 1 });
 
-		const result = await run("u2");
+		const result = await run("u2") as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.summary).toContain("[bbbbbbbbbbbb]");
+		expect(result.compaction.summary).toContain("2 source entries (~7 tokens)");
+		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
 		expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
 		const [message, level] = ctx.ui.notify.mock.calls[0];
 		expect(level).toBe("warning");
 		expect(message).toContain("observer has not reached 2 source entries (~7 tokens)");
 		expect(message).toContain("exceeds the ~1-token budget");
-		expect(message).toContain("delegating to Pi's native summarizer");
 	});
 
-	it("delegates when the retained tail plus the rendered memory summary exceed the budget", async () => {
+	it("falls back to Pi's cut when the retained tail plus the rendered memory summary exceed the budget", async () => {
 		// The retained source alone (~14 tokens) fits a 100-token budget, but the
 		// rendered summary adds a few hundred tokens of instructions and lines.
 		const { run, ctx } = setup({ entries: laggingBranch(), compactionMaxRetainedTokens: 100 });
 
-		const result = await run("u2");
+		const result = await run("u2") as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.summary).toContain("2 source entries (~7 tokens)");
 		const [message, level] = ctx.ui.notify.mock.calls[0];
 		expect(level).toBe("warning");
 		expect(message).toContain("plus a ~");
@@ -167,18 +170,19 @@ describe("compaction hook when the observer is behind Pi's cut", () => {
 	it("derives the retained-tail budget from the session model's context window", async () => {
 		// Half of a 4-token window is 2; the retained tail is larger than that.
 		const tooSmall = setup({ entries: laggingBranch(), model: { contextWindow: 4 } });
-		expect(await tooSmall.run("u2")).toBeUndefined();
+		expect(((await tooSmall.run("u2")) as any).compaction.firstKeptEntryId).toBe("u2");
 
 		const roomy = setup({ entries: laggingBranch(), model: { contextWindow: 4_000 } });
 		expect(((await roomy.run("u2")) as any).compaction.firstKeptEntryId).toBe("a1");
 	});
 
-	it("delegates during overflow recovery instead of retaining more context", async () => {
+	it("falls back to Pi's cut during overflow recovery instead of retaining more context", async () => {
 		const { run, ctx } = setup({ entries: laggingBranch() });
 
-		const result = await run("u2", "overflow");
+		const result = await run("u2", "overflow") as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.summary).toContain("2 source entries (~7 tokens)");
 		expect(ctx.ui.notify.mock.calls[0][0]).toContain("overflow recovery");
 	});
 
@@ -205,7 +209,7 @@ describe("compaction hook when the observer is behind Pi's cut", () => {
 		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa"]);
 	});
 
-	it("delegates when the observation frontier is still before the compaction range", async () => {
+	it("falls back to Pi's cut when the observation frontier is still before the compaction range", async () => {
 		// Coverage stops at a0, but the previous compaction already cut at a1's
 		// turn: nothing inside the current range is observed, so moving the cut
 		// back would free nothing.
@@ -223,13 +227,13 @@ describe("compaction hook when the observer is behind Pi's cut", () => {
 		];
 		const { run, ctx } = setup({ entries });
 
-		const result = await run("a3");
+		const result = await run("a3") as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction.firstKeptEntryId).toBe("a3");
 		expect(ctx.ui.notify.mock.calls[0][0]).toContain("nothing observed can be compacted");
 	});
 
-	it("delegates when the range starts on a metadata entry and the frontier is before the range", async () => {
+	it("falls back to Pi's cut when the range starts on a metadata entry and the frontier is before the range", async () => {
 		// Pi may place the retention boundary on a zero-token ledger entry that
 		// precedes the first kept message. Cutting one entry later would free
 		// nothing and re-trigger Pi's threshold immediately.
@@ -250,19 +254,22 @@ describe("compaction hook when the observer is behind Pi's cut", () => {
 		];
 		const { run, ctx } = setup({ entries });
 
-		const result = await run("a4");
+		const result = await run("a4") as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction.firstKeptEntryId).toBe("a4");
 		expect(ctx.ui.notify.mock.calls[0][0]).toContain("nothing observed can be compacted");
 	});
 
-	it("delegates when nothing has been observed at all", async () => {
-		const entries = [userMessage("u0"), assistantMessage("a0"), userMessage("u1")];
+	it("falls back to Pi's cut with excerpts when nothing has been observed at all", async () => {
+		const entries = [userMessage("u0", "build the importer"), assistantMessage("a0"), userMessage("u1")];
 		const { run, ctx } = setup({ entries });
 
-		const result = await run("u1");
+		const result = await run("u1") as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction.firstKeptEntryId).toBe("u1");
+		expect(result.compaction.summary).toContain("No observational memory was recorded");
+		expect(result.compaction.summary).toContain("2 source entries");
+		expect(result.compaction.summary).toContain("build the importer");
 		expect(ctx.ui.notify.mock.calls[0][0]).toContain("no observation coverage");
 	});
 
@@ -305,20 +312,18 @@ describe("resolveCompactionCut", () => {
 });
 
 describe("budgeted summary with no record (PR #81 review, issue 3)", () => {
-	it("delegates instead of writing a summary with instructions only", async () => {
+	it("renders a truncated model-free summary instead of one with instructions only", async () => {
 		const huge = observationsRecordedEntry("om-huge", {
 			observations: [observation("dddddddddddd", { sourceEntryIds: ["a0"], content: "x".repeat(8000), tokenCount: 2000 })],
 			coversUpToId: "u2",
 		});
 		const entries = [userMessage("u0"), assistantMessage("a0"), userMessage("u1"), assistantMessage("a1"), userMessage("u2"), huge];
-		const { run, ctx } = setup({ entries, compactionSummaryMaxTokens: 500 });
+		const { run } = setup({ entries, compactionSummaryMaxTokens: 500 });
 
-		const result = await run("u2");
+		const result = await run("u2") as any;
 
-		expect(result).toBeUndefined();
-		expect(ctx.ui.notify).toHaveBeenCalledWith(
-			"Observational memory: no memory record fits the ~500-token summary budget; delegating to Pi's native summarizer",
-			"warning",
-		);
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.summary).toContain("[dddddddddddd]");
+		expect(Math.ceil(result.compaction.summary.length / 4)).toBeLessThanOrEqual(500);
 	});
 });

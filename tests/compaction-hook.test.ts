@@ -52,13 +52,15 @@ function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number;
 }
 
 describe("V3 compaction hook", () => {
-	it("delegates to native compaction when there is no V3 memory", async () => {
+	it("renders a fixed no-memory summary instead of declining when there is no V3 memory", async () => {
 		const entries = [textCustomMessage("raw-1", "aaaa")];
 		const { run, runtime, pi } = setup({ entries });
 
-		const result = await run("raw-1");
+		const result = await run("raw-1") as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction.firstKeptEntryId).toBe("raw-1");
+		expect(result.compaction.tokensBefore).toBe(123);
+		expect(result.compaction.summary).toContain("No observational memory was recorded");
 		expect(runtime.resolveModel).not.toHaveBeenCalled();
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(runtime.compactHookInFlight).toBe(false);
@@ -133,7 +135,7 @@ describe("V3 compaction hook", () => {
 		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
 	});
 
-	it("delegates to native compaction when only old V2 memory exists", async () => {
+	it("renders a fixed no-memory summary when only old V2 memory exists", async () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
 			oldV2ObservationEntry("v2-obs"),
@@ -141,9 +143,10 @@ describe("V3 compaction hook", () => {
 		];
 		const { run } = setup({ entries });
 
-		const result = await run("cmp-v2");
+		const result = await run("cmp-v2") as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction.firstKeptEntryId).toBe("cmp-v2");
+		expect(result.compaction.summary).toContain("No observational memory was recorded");
 	});
 
 	it("does not wait for worker promises or call model resolution", async () => {
@@ -155,7 +158,7 @@ describe("V3 compaction hook", () => {
 			new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), 50)),
 		]);
 
-		expect(result).toBeUndefined();
+		expect(result).toMatchObject({ compaction: { firstKeptEntryId: "raw-1" } });
 		expect(runtime.resolveModel).not.toHaveBeenCalled();
 	});
 

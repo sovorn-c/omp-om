@@ -742,6 +742,122 @@ ${keptObservations.map(observationToSummaryLine).join("\n")}`);
     omittedObservations
   };
 }
+var NO_MEMORY_NOTICE = "No observational memory was recorded for this session before this compaction; the earlier context is not summarized.";
+var FALLBACK_HEADER = "Observational memory (model-free fallback summary; no memory model was used).";
+var EXCERPT_MAX_CHARS = 200;
+var FALLBACK_EXCERPT_SHARE = 0.4;
+var OMITTED_EXCERPTS_NOTE_TOKENS = 12;
+var MIN_TRUNCATED_RECORD_TOKENS = 16;
+function describeUnobservedSpan(span) {
+  return `${span.entryCount} source entr${span.entryCount === 1 ? "y" : "ies"} (~${span.tokens.toLocaleString()} tokens)`;
+}
+function blockTokens(text) {
+  return estimateTokens(text) + 1;
+}
+function truncateToTokens(text, tokens) {
+  if (estimateTokens(text) <= tokens) return text;
+  return `${text.slice(0, Math.max(0, tokens * 4 - 1)).trimEnd()}\u2026`;
+}
+function selectTruncatedLines(records, line, budget) {
+  const cap = Math.min(budget, Math.max(MIN_TRUNCATED_RECORD_TOKENS, Math.floor(budget / 2)));
+  const picked = [];
+  let tokens = 0;
+  if (cap <= 0) return { lines: picked, tokens };
+  for (let i = records.length - 1; i >= 0; i--) {
+    const text = truncateToTokens(line(records[i]), cap);
+    const cost = blockTokens(text);
+    if (tokens + cost > budget) continue;
+    tokens += cost;
+    picked.push(text);
+  }
+  return { lines: picked.reverse(), tokens };
+}
+function textOfContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const texts = [];
+  for (const block of content) {
+    if (typeof block === "object" && block !== null && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") {
+      texts.push(block.text);
+    }
+  }
+  return texts.join(" ");
+}
+function entryExcerptSource(entry) {
+  if (entry.type === "message") {
+    const message = entry.message;
+    if (typeof message === "object" && message !== null && "role" in message && message.role === "user" && "content" in message) {
+      return textOfContent(message.content);
+    }
+    return void 0;
+  }
+  if (entry.type === "custom_message") return textOfContent(entry.content);
+  if (entry.type === "branch_summary") return typeof entry.summary === "string" ? entry.summary : void 0;
+  return void 0;
+}
+function excerptOf(text) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > EXCERPT_MAX_CHARS ? `${flat.slice(0, EXCERPT_MAX_CHARS).trimEnd()}\u2026` : flat;
+}
+function pickNewestExcerpts(lines, budget) {
+  const picked = [];
+  let tokens = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const cost = estimateTokens(lines[i]) + 1;
+    if (tokens + cost > budget) break;
+    tokens += cost;
+    picked.push(lines[i]);
+  }
+  return picked.reverse();
+}
+function renderFallbackSummary(entries, foldThroughEntryId, opts) {
+  const projection = buildCompactionProjection(entries, foldThroughEntryId, {
+    observationsPoolMaxTokens: opts.observationsPoolMaxTokens ?? Number.POSITIVE_INFINITY
+  });
+  const foldIndex = entryIndexForId(entries, foldThroughEntryId);
+  const gap = foldIndex === -1 ? void 0 : unobservedSourceSpanBefore(entries, foldIndex);
+  const hasLedger = projection.reflections.length + projection.observations.length > 0;
+  let budget = opts.maxTokens - blockTokens(FALLBACK_HEADER);
+  if (!hasLedger) budget -= blockTokens(NO_MEMORY_NOTICE);
+  let unobserved = [];
+  if (gap) {
+    const notice = `${describeUnobservedSpan(gap)} before this point were never observed, so no memory record describes them and they are no longer in context.`;
+    budget -= blockTokens(notice);
+    const candidates = [];
+    for (let i = gap.firstIndex; i <= gap.lastIndex; i++) {
+      if (!isSourceEntry(entries[i])) continue;
+      const text = excerptOf(entryExcerptSource(entries[i]) ?? "");
+      if (text) candidates.push(`- ${text}`);
+    }
+    const excerptBudget = Math.floor(Math.max(0, budget) * FALLBACK_EXCERPT_SHARE);
+    let excerpts = pickNewestExcerpts(candidates, excerptBudget);
+    if (excerpts.length < candidates.length) excerpts = pickNewestExcerpts(candidates, excerptBudget - OMITTED_EXCERPTS_NOTE_TOKENS);
+    const lines = [notice];
+    if (excerpts.length > 0) lines.push(`Excerpts of the unobserved input:
+${excerpts.join("\n")}`);
+    if (excerpts.length < candidates.length) {
+      const omitted = candidates.length - excerpts.length;
+      lines.push(`(${omitted} more unobserved input${omitted === 1 ? "" : "s"} not shown.)`);
+    }
+    unobserved = lines;
+    budget -= blockTokens(lines.slice(1).join("\n"));
+  }
+  const parts = [FALLBACK_HEADER];
+  if (hasLedger) {
+    const sectionBudget = Math.max(0, budget - blockTokens("## Reflections") - blockTokens("## Observations"));
+    const reserved = selectTruncatedLines(projection.observations, observationToSummaryLine, Math.floor(sectionBudget * SUMMARY_OBSERVATIONS_MIN_SHARE));
+    const reflectionLines = selectTruncatedLines(projection.reflections, reflectionToSummaryLine, sectionBudget - reserved.tokens);
+    const observationLines = selectTruncatedLines(projection.observations, observationToSummaryLine, sectionBudget - reflectionLines.tokens);
+    if (reflectionLines.lines.length > 0) parts.push(`## Reflections
+${reflectionLines.lines.join("\n")}`);
+    if (observationLines.lines.length > 0) parts.push(`## Observations
+${observationLines.lines.join("\n")}`);
+  } else {
+    parts.push(NO_MEMORY_NOTICE);
+  }
+  parts.push(...unobserved);
+  return truncateToTokens(parts.join("\n\n"), opts.maxTokens);
+}
 
 // src/session-ledger/worker-memory.ts
 function lineTokens(line) {
@@ -1485,9 +1601,9 @@ function serializeSourceAddressedBranchEntries(entries, options = {}) {
     const block = `${label}
 ${rendered}`;
     const separator = blocks.length > 0 ? "\n\n" : "";
-    const blockTokens = estimateStringTokens(`${separator}${block}`);
+    const blockTokens2 = estimateStringTokens(`${separator}${block}`);
     const maxTokens = options.maxTokens;
-    if (maxTokens !== void 0 && estimatedTokens + blockTokens > maxTokens) {
+    if (maxTokens !== void 0 && estimatedTokens + blockTokens2 > maxTokens) {
       if (blocks.length > 0) break;
       const excerpt = truncateSourceBlockToTokenBudget(label, rendered, maxTokens);
       if (!excerpt) break;
@@ -1499,7 +1615,7 @@ ${rendered}`;
     }
     blocks.push(block);
     sourceEntryIds.push(entry.id);
-    estimatedTokens += blockTokens;
+    estimatedTokens += blockTokens2;
   }
   const text = blocks.join("\n\n");
   return { text, sourceEntryIds, estimatedTokens: estimateStringTokens(text), truncatedSourceEntryIds };
@@ -1567,8 +1683,8 @@ var RecordObservationsSchema = Type.Object({
 });
 var ObserverStreamError = class extends Error {
   stopReason;
-  constructor(stopReason, errorMessage2) {
-    super(`observer stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
+  constructor(stopReason, errorMessage3) {
+    super(`observer stream ended with stopReason "${stopReason}"${errorMessage3 ? `: ${errorMessage3}` : ""}`);
     this.name = "ObserverStreamError";
     this.stopReason = stopReason;
   }
@@ -1710,7 +1826,7 @@ async function catchUpObserver(args) {
   });
   if (!resolved.ok) {
     debugLog("compaction.catch_up.model_unavailable", { reason: resolved.reason });
-    return { ...result, stoppedBecause: "model_unavailable" };
+    return { ...result, stoppedBecause: "model_unavailable", reason: resolved.reason };
   }
   const contextWindow = resolved.model.contextWindow;
   const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
@@ -1749,11 +1865,12 @@ async function catchUpObserver(args) {
       });
     } catch (error) {
       if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
-      const errorMessage2 = error instanceof Error ? error.message : String(error);
-      debugLog("compaction.catch_up.error", { chunkIndex, errorMessage: errorMessage2 });
-      if (ctx.hasUI) ctx.ui.notify(`Observational memory: catch-up observer failed: ${errorMessage2}`, "warning");
+      const errorMessage3 = error instanceof Error ? error.message : String(error);
+      debugLog("compaction.catch_up.error", { chunkIndex, errorMessage: errorMessage3 });
+      if (ctx.hasUI) ctx.ui.notify(`Observational memory: catch-up observer failed: ${errorMessage3}`, "warning");
       return { ...result, stoppedBecause: "error" };
     }
+    if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
     const data = observations && observations.length > 0 ? buildObservationsRecordedData(observations, coversUpToId) : void 0;
     if (!data) {
       debugLog("compaction.catch_up.empty", { chunkIndex, coversUpToId });
@@ -1771,6 +1888,7 @@ async function catchUpObserver(args) {
 }
 
 // src/hooks/compaction-hook.ts
+var HOOK_CATCH_UP_DEADLINE_MS = 2e4;
 var DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 2e4;
 function observationsPoolMaxTokens(runtime) {
   const value = runtime.config.observationsPoolMaxTokens;
@@ -1792,24 +1910,27 @@ function findCutPointAtOrBefore(entries, index, startIndex) {
   return -1;
 }
 function resolveCompactionCut(entries, firstKeptEntryId, options) {
+  const piCut = { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId };
   const cutIndex = entryIndexForId(entries, firstKeptEntryId);
-  if (cutIndex === -1) return { kind: "cut", cut: { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId } };
+  if (cutIndex === -1) return { kind: "cut", cut: piCut };
   const gap = unobservedSourceSpanBefore(entries, cutIndex);
-  if (!gap) return { kind: "cut", cut: { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId } };
-  if (options.reason === "overflow") return { kind: "delegate", reason: "overflow recovery", gap };
+  if (!gap) return { kind: "cut", cut: piCut };
+  if (options.reason === "overflow") return { kind: "fallback", cut: piCut, reason: "overflow recovery", gap };
   const coverageMarkerId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
-  if (!coverageMarkerId) return { kind: "delegate", reason: "no observation coverage", gap };
+  if (!coverageMarkerId) return { kind: "fallback", cut: piCut, reason: "no observation coverage", gap };
   const rangeStart = compactionRangeStartIndex(entries);
   const coverageIndex2 = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-  if (coverageIndex2 < rangeStart) return { kind: "delegate", reason: "nothing observed can be compacted", gap };
+  const nothingObserved = { kind: "fallback", cut: piCut, reason: "nothing observed can be compacted", gap };
+  if (coverageIndex2 < rangeStart) return nothingObserved;
   const safeCutIndex = findCutPointAtOrBefore(entries, gap.firstIndex, rangeStart);
-  if (safeCutIndex <= rangeStart) return { kind: "delegate", reason: "nothing observed can be compacted", gap };
+  if (safeCutIndex <= rangeStart) return nothingObserved;
   const freedTokens = rawTokensAfterIndex(entries, rangeStart - 1) - rawTokensAfterIndex(entries, safeCutIndex - 1);
-  if (freedTokens <= 0) return { kind: "delegate", reason: "nothing observed can be compacted", gap };
+  if (freedTokens <= 0) return nothingObserved;
   const retainedTokens = rawTokensAfterIndex(entries, safeCutIndex - 1);
   if (retainedTokens > options.maxRetainedTokens) {
     return {
-      kind: "delegate",
+      kind: "fallback",
+      cut: piCut,
       reason: `retaining ~${retainedTokens.toLocaleString()} tokens exceeds the ~${options.maxRetainedTokens.toLocaleString()}-token budget`,
       gap
     };
@@ -1821,8 +1942,18 @@ function resolveCompactionCut(entries, firstKeptEntryId, options) {
     retainedTokens
   };
 }
-function gapLabel(gap) {
-  return `${gap.entryCount} source entr${gap.entryCount === 1 ? "y" : "ies"} (~${gap.tokens.toLocaleString()} tokens)`;
+function warn(ctx, message) {
+  notify(ctx, message, "warning");
+}
+function notify(ctx, message, level) {
+  if (!ctx.hasUI) return;
+  try {
+    ctx.ui.notify(message, level);
+  } catch {
+  }
+}
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 function debugContext(runtime, ctx) {
   let sessionId;
@@ -1841,6 +1972,45 @@ function debugContext(runtime, ctx) {
     runId: `compaction-${Date.now().toString(36)}`
   };
 }
+async function catchUpWithDeadline(args, signal) {
+  const controller = new AbortController();
+  let interrupt;
+  const interrupted = new Promise((resolve) => {
+    interrupt = resolve;
+  });
+  const stop = (stoppedBecause) => {
+    controller.abort();
+    interrupt({ chunksRecorded: 0, stoppedBecause });
+  };
+  const onAbort = () => stop("aborted");
+  const timer = setTimeout(() => stop("deadline"), HOOK_CATCH_UP_DEADLINE_MS);
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await Promise.race([
+      catchUpObserver({
+        ...args,
+        maxChunks: args.runtime.config.compactionCatchUpMaxChunks,
+        signal: controller.signal
+      }),
+      interrupted
+    ]);
+  } catch (error) {
+    return { chunksRecorded: 0, stoppedBecause: "error", reason: errorMessage(error) };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function warnCatchUpStopped(ctx, result) {
+  if (result.stoppedBecause === "deadline") {
+    warn(ctx, `Observational memory: observer catch-up reached the ${HOOK_CATCH_UP_DEADLINE_MS / 1e3}s hook deadline; compacting with the memory recorded so far`);
+  } else if (result.stoppedBecause === "model_unavailable") {
+    warn(ctx, `Observational memory: memory model unavailable: ${result.reason}; compacting without catching up the observer`);
+  } else if (result.stoppedBecause === "error" && result.reason) {
+    warn(ctx, `Observational memory: observer catch-up failed: ${result.reason}; compacting with the memory recorded so far`);
+  }
+}
 async function handleCompaction(pi, event, ctx, runtime) {
   const { preparation, branchEntries } = event;
   const { firstKeptEntryId, tokensBefore } = preparation;
@@ -1848,118 +2018,120 @@ async function handleCompaction(pi, event, ctx, runtime) {
   const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
   const maxRetainedTokens = resolveCompactionMaxRetainedTokens(runtime.config, contextWindow);
   const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
+  const poolMaxTokens = observationsPoolMaxTokens(runtime);
   const reason = event.reason;
   let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
-  if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !runtime.consolidationInFlight && latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED) !== void 0) {
-    const catchUp = await catchUpObserver({
-      pi,
-      runtime,
-      ctx,
-      entries,
-      gap: resolution.gap,
-      maxChunks: runtime.config.compactionCatchUpMaxChunks,
-      signal: event.signal
-    });
+  if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !runtime.consolidationInFlight) {
+    const catchUp = await catchUpWithDeadline({ pi, runtime, ctx, entries, gap: resolution.gap }, event.signal);
+    if (event.signal?.aborted) return { cancel: true };
     debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
-    if (catchUp.chunksRecorded > 0) {
-      entries = ctx.sessionManager?.getBranch?.() ?? entries;
-      resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
-    }
+    warnCatchUpStopped(ctx, catchUp);
+    entries = ctx.sessionManager?.getBranch?.() ?? entries;
+    resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
   }
-  let projection;
+  const summaryOptions = { maxTokens: summaryMaxTokens, observationsPoolMaxTokens: poolMaxTokens };
+  let fallback = resolution.kind === "fallback" ? resolution : void 0;
+  let cut = resolution.cut;
+  let projection = buildCompactionProjection(entries, cut.foldThroughEntryId, { observationsPoolMaxTokens: poolMaxTokens });
   let summary = "";
   if (resolution.kind === "cut") {
-    projection = buildCompactionProjection(
-      entries,
-      resolution.cut.foldThroughEntryId,
-      { observationsPoolMaxTokens: observationsPoolMaxTokens(runtime) }
-    );
     const rendered = renderSummaryWithBudget(projection.reflections, projection.observations, { maxTokens: summaryMaxTokens });
     summary = rendered.text;
-    const hadRecords = projection.reflections.length + projection.observations.length > 0;
-    if (hadRecords && rendered.reflections.length + rendered.observations.length === 0) {
-      debugLog("compaction.summary_budget_empty", {
-        summaryMaxTokens,
-        reflections: projection.reflections.length,
-        observations: projection.observations.length
-      });
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          `Observational memory: no memory record fits the ~${summaryMaxTokens.toLocaleString()}-token summary budget; delegating to Pi's native summarizer`,
-          "warning"
-        );
+    if (rendered.reflections.length + rendered.observations.length === 0) {
+      if (projection.reflections.length + projection.observations.length > 0) {
+        debugLog("compaction.summary_budget_empty", {
+          summaryMaxTokens,
+          reflections: projection.reflections.length,
+          observations: projection.observations.length
+        });
+        warn(ctx, `Observational memory: no memory record fits the ~${summaryMaxTokens.toLocaleString()}-token summary budget; using a truncated model-free summary`);
       }
-      summary = "";
+      summary = renderFallbackSummary(entries, cut.foldThroughEntryId, summaryOptions);
     }
     if (resolution.gap && resolution.retainedTokens !== void 0) {
       const summaryTokens = estimateStringTokens(summary);
-      const afterTokens = resolution.retainedTokens + summaryTokens;
-      if (afterTokens > maxRetainedTokens) {
-        resolution = {
-          kind: "delegate",
+      if (resolution.retainedTokens + summaryTokens > maxRetainedTokens) {
+        fallback = {
+          kind: "fallback",
+          cut: { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId },
           gap: resolution.gap,
           reason: `retaining ~${resolution.retainedTokens.toLocaleString()} tokens plus a ~${summaryTokens.toLocaleString()}-token memory summary exceeds the ~${maxRetainedTokens.toLocaleString()}-token budget`
         };
+        cut = fallback.cut;
+        projection = buildCompactionProjection(entries, cut.foldThroughEntryId, { observationsPoolMaxTokens: poolMaxTokens });
       }
     }
   }
-  if (resolution.gap) {
+  if (fallback) {
+    summary = renderFallbackSummary(entries, cut.foldThroughEntryId, summaryOptions);
+    warn(
+      ctx,
+      `Observational memory: observer has not reached ${describeUnobservedSpan(fallback.gap)} before the compaction cut and they cannot be retained (${fallback.reason}); compacting with a model-free summary of the memory so far`
+    );
+  }
+  const gap = resolution.gap;
+  if (gap) {
     debugLog("compaction.observer_behind", {
       proposedFirstKeptEntryId: firstKeptEntryId,
-      unobservedEntries: resolution.gap.entryCount,
-      unobservedTokens: resolution.gap.tokens,
-      outcome: resolution.kind,
-      ...resolution.kind === "cut" ? {
-        firstKeptEntryId: resolution.cut.firstKeptEntryId,
-        foldThroughEntryId: resolution.cut.foldThroughEntryId,
-        retainedTokens: resolution.retainedTokens,
-        summaryTokens: estimateStringTokens(summary),
-        maxRetainedTokens
-      } : { reason: resolution.reason }
+      unobservedEntries: gap.entryCount,
+      unobservedTokens: gap.tokens,
+      outcome: fallback ? "fallback" : "cut",
+      firstKeptEntryId: cut.firstKeptEntryId,
+      foldThroughEntryId: cut.foldThroughEntryId,
+      summaryTokens: estimateStringTokens(summary),
+      maxRetainedTokens,
+      ...fallback ? { reason: fallback.reason } : { retainedTokens: resolution.kind === "cut" ? resolution.retainedTokens : void 0 }
     });
-  }
-  if (resolution.kind === "delegate") {
-    if (ctx.hasUI) {
-      ctx.ui.notify(
-        `Observational memory: observer has not reached ${gapLabel(resolution.gap)} before the compaction cut and they cannot be retained (${resolution.reason}); delegating to Pi's native summarizer`,
-        "warning"
+    if (!fallback) {
+      notify(
+        ctx,
+        `Observational memory: observer has not reached ${describeUnobservedSpan(gap)} before the compaction cut; keeping them in context until they are observed`,
+        "info"
       );
     }
-    return void 0;
-  }
-  if (!projection || summary.length === 0) {
-    return void 0;
-  }
-  if (resolution.gap && ctx.hasUI) {
-    ctx.ui.notify(
-      `Observational memory: observer has not reached ${gapLabel(resolution.gap)} before the compaction cut; keeping them in context until they are observed`,
-      "info"
-    );
   }
   return {
     compaction: {
       summary,
-      firstKeptEntryId: resolution.cut.firstKeptEntryId,
+      firstKeptEntryId: cut.firstKeptEntryId,
       tokensBefore,
       details: projection.details
     }
   };
 }
+function compactAfterFailure(event, ctx, runtime, error) {
+  if (event.signal?.aborted) return { cancel: true };
+  warn(ctx, `Observational memory: compaction hook failed (${errorMessage(error)}); compacting with a model-free summary`);
+  const firstKeptEntryId = event.preparation?.firstKeptEntryId;
+  if (typeof firstKeptEntryId !== "string") return { cancel: true };
+  let summary = NO_MEMORY_NOTICE;
+  let details;
+  try {
+    const entries = event.branchEntries;
+    const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
+    const options = {
+      maxTokens: resolveCompactionSummaryMaxTokens(runtime.config, contextWindow),
+      observationsPoolMaxTokens: observationsPoolMaxTokens(runtime)
+    };
+    summary = renderFallbackSummary(entries, firstKeptEntryId, options);
+    details = buildCompactionProjection(entries, firstKeptEntryId, options).details;
+  } catch {
+  }
+  return { compaction: { summary, firstKeptEntryId, tokensBefore: event.preparation.tokensBefore, details } };
+}
 function registerCompactionHook(pi, runtime) {
   pi.on("session_before_compact", async (event, ctx) => {
     if (runtime.compactHookInFlight) {
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          "Observational memory: another compaction is already in progress; cancelling duplicate",
-          "warning"
-        );
-      }
+      warn(ctx, "Observational memory: another compaction is already in progress; cancelling duplicate");
       return { cancel: true };
     }
+    if (event.signal?.aborted) return { cancel: true };
     runtime.compactHookInFlight = true;
     try {
       runtime.ensureConfig(ctx.cwd);
       return await withDebugLogContext(debugContext(runtime, ctx), () => handleCompaction(pi, event, ctx, runtime));
+    } catch (error) {
+      return compactAfterFailure(event, ctx, runtime, error);
     } finally {
       runtime.compactHookInFlight = false;
     }
@@ -2110,8 +2282,8 @@ function coverageTierForObservation(observation, coverageById) {
 // src/agents/dropper/agent.ts
 var DropperStreamError = class extends Error {
   stopReason;
-  constructor(stopReason, errorMessage2) {
-    super(`dropper stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
+  constructor(stopReason, errorMessage3) {
+    super(`dropper stream ended with stopReason "${stopReason}"${errorMessage3 ? `: ${errorMessage3}` : ""}`);
     this.name = "DropperStreamError";
     this.stopReason = stopReason;
   }
@@ -2410,8 +2582,8 @@ Examples:
 // src/agents/reflector/agent.ts
 var ReflectorStreamError = class extends Error {
   stopReason;
-  constructor(stopReason, errorMessage2) {
-    super(`reflector stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
+  constructor(stopReason, errorMessage3) {
+    super(`reflector stream ended with stopReason "${stopReason}"${errorMessage3 ? `: ${errorMessage3}` : ""}`);
     this.name = "ReflectorStreamError";
     this.stopReason = stopReason;
   }
@@ -3021,7 +3193,7 @@ function hasConfiguredProviderCredential(registry, model) {
     return false;
   }
 }
-function errorMessage(error) {
+function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
 }
 var Runtime = class {
@@ -3063,7 +3235,7 @@ var Runtime = class {
       if (!ctx.models) return { ok: false, reason: "ctx.models is unavailable; omp-om requires omp's extension context" };
       model = ctx.models.resolve(spec);
     } catch (error) {
-      return { ok: false, reason: `memory model "${spec}" failed to resolve: ${errorMessage(error)}` };
+      return { ok: false, reason: `memory model "${spec}" failed to resolve: ${errorMessage2(error)}` };
     }
     if (!model) {
       return { ok: false, reason: `memory model "${spec}" did not resolve to an available model; set "model" in omp-om.json` };
@@ -3071,7 +3243,7 @@ var Runtime = class {
     try {
       return await this.resolveCandidate(ctx, model);
     } catch (error) {
-      return { ok: false, reason: `auth lookup failed for memory model "${spec}": ${errorMessage(error)}` };
+      return { ok: false, reason: `auth lookup failed for memory model "${spec}": ${errorMessage2(error)}` };
     }
   }
   /** Apply Pi's request-auth acceptance rule to one already-selected model. */
@@ -3191,14 +3363,14 @@ var Runtime = class {
     const hasUI = ctx.hasUI;
     const ui = ctx.ui;
     return (async () => {
-      let errorMessage2;
+      let errorMessage3;
       try {
         await work();
       } catch (error) {
-        errorMessage2 = error instanceof Error ? error.message : String(error);
-        if (hasUI && ui) ui.notify(`Observational memory: ${label} failed: ${errorMessage2}`, "warning");
+        errorMessage3 = error instanceof Error ? error.message : String(error);
+        if (hasUI && ui) ui.notify(`Observational memory: ${label} failed: ${errorMessage3}`, "warning");
       } finally {
-        onFinally(errorMessage2);
+        onFinally(errorMessage3);
       }
     })();
   }

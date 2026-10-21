@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockAgents = vi.hoisted(() => ({ runObserver: vi.fn() }));
 
@@ -7,7 +7,7 @@ vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
 	runObserver: mockAgents.runObserver,
 }));
 
-import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import { HOOK_CATCH_UP_DEADLINE_MS, registerCompactionHook } from "../src/hooks/compaction-hook.js";
 import { OM_OBSERVATIONS_RECORDED } from "../src/session-ledger/index.js";
 import { compactionEntry, observation, observationsRecordedEntry, rawMessage, type TestEntry } from "./fixtures/session.js";
 
@@ -55,6 +55,8 @@ function setup(args: {
 	observerChunkMaxTokens?: number;
 	consolidationInFlight?: boolean;
 	resolveOk?: boolean;
+	signal?: AbortSignal;
+	ensureConfigError?: Error;
 }) {
 	let entries = [...args.entries];
 	let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
@@ -88,7 +90,9 @@ function setup(args: {
 		resolveModel: vi.fn(async () => (args.resolveOk === false
 			? { ok: false, reason: "no model" }
 			: { ok: true, model: { provider: "gtr7", id: "memory", contextWindow: 65536 }, apiKey: "key" })),
-		ensureConfig: vi.fn(),
+		ensureConfig: vi.fn(() => {
+			if (args.ensureConfigError) throw args.ensureConfigError;
+		}),
 	};
 	registerCompactionHook(pi as any, runtime as any);
 	if (!handler) throw new Error("compaction handler was not registered");
@@ -106,13 +110,17 @@ function setup(args: {
 		branchEntries: args.entries,
 		reason: "threshold",
 		willRetry: false,
-		signal: new AbortController().signal,
+		signal: args.signal ?? new AbortController().signal,
 	}, ctx);
 	return { pi, runtime, ctx, run, getEntries: () => entries };
 }
 
 beforeEach(() => {
 	mockAgents.runObserver.mockReset();
+});
+
+afterEach(() => {
+	vi.useRealTimers();
 });
 
 describe("compaction hook synchronous catch-up", () => {
@@ -212,14 +220,34 @@ describe("compaction hook synchronous catch-up", () => {
 		expect(result.compaction.firstKeptEntryId).toBe("a1");
 	});
 
-	it("does not bootstrap memory when nothing has ever been observed", async () => {
+	it("runs catch-up without a coverage marker, observing from the start of the branch", async () => {
 		const entries = [userMessage("u0"), assistantMessage("a0"), userMessage("u1")];
-		const { run, runtime } = setup({ entries });
+		const gapObs = observation("cccccccccccc", { sourceEntryIds: ["u0", "a0"], tokenCount: 12 });
+		mockAgents.runObserver.mockResolvedValueOnce([gapObs]);
+		const { run, pi, runtime } = setup({ entries });
 
-		const result = await run("u1");
+		const result = await run("u1") as any;
 
-		expect(result).toBeUndefined();
-		expect(runtime.resolveModel).not.toHaveBeenCalled();
+		expect(runtime.resolveModel).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runObserver.mock.calls[0][0].allowedSourceEntryIds).toEqual(["u0", "a0"]);
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [gapObs], coversUpToId: "a0" });
+		expect(result.compaction.firstKeptEntryId).toBe("u1");
+		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["cccccccccccc"]);
+	});
+
+	it("returns a compaction when the ledger is empty and the model is unresolved, and warns", async () => {
+		const entries = [userMessage("u0", "plan the migration"), assistantMessage("a0"), userMessage("u1")];
+		const { run, ctx } = setup({ entries, resolveOk: false });
+
+		const result = await run("u1") as any;
+
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
+		expect(result.compaction.summary.length).toBeGreaterThan(0);
+		expect(result.compaction.firstKeptEntryId).toBe("u1");
+		expect(result.compaction.summary).toContain("plan the migration");
+		const warnings = ctx.ui.notify.mock.calls.filter(([, level]: [string, string]) => level === "warning");
+		expect(warnings.some(([message]: [string]) => message.includes("memory model unavailable: no model"))).toBe(true);
 	});
 
 	it("falls back when the memory model is unavailable", async () => {
@@ -260,5 +288,159 @@ describe("catch-up coverage truthfulness (PR #81 review, issue 2)", () => {
 		const allowed = mockAgents.runObserver.mock.calls[0][0].allowedSourceEntryIds;
 		expect(allowed[0]).toBe("u1");
 		expect(allowed).toEqual(["u1", "a1", "u2", "a2", "u3", "a3"]);
+	});
+});
+
+describe("compaction hook deadline and failure handling", () => {
+	const warningsOf = (ctx: { ui: { notify: ReturnType<typeof vi.fn> } }): string[] =>
+		ctx.ui.notify.mock.calls.filter(([, level]) => level === "warning").map(([message]) => message as string);
+
+	it("catch-up that never resolves is cut at HOOK_CATCH_UP_DEADLINE_MS", async () => {
+		vi.useFakeTimers();
+		let observerSignal: AbortSignal | undefined;
+		mockAgents.runObserver.mockImplementation(({ signal }: { signal?: AbortSignal }) => {
+			observerSignal = signal;
+			return new Promise(() => {});
+		});
+		const { run, ctx, pi } = setup({ entries: laggingBranch() });
+		let settled = false;
+		const pending = run("u2").then((value) => {
+			settled = true;
+			return value;
+		});
+
+		await vi.advanceTimersByTimeAsync(HOOK_CATCH_UP_DEADLINE_MS - 1);
+		expect(settled).toBe(false);
+		expect(observerSignal?.aborted).toBe(false);
+
+		await vi.advanceTimersByTimeAsync(1);
+		const result = await pending as any;
+
+		expect(HOOK_CATCH_UP_DEADLINE_MS).toBe(20_000);
+		expect(result.compaction.firstKeptEntryId).toBe("a1");
+		expect(result.compaction.summary.length).toBeGreaterThan(0);
+		expect(observerSignal?.aborted).toBe(true);
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+		expect(warningsOf(ctx).some((message) => message.includes("deadline"))).toBe(true);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("does not record observations that arrive after the deadline", async () => {
+		vi.useFakeTimers();
+		let release: (value: unknown) => void = () => {};
+		mockAgents.runObserver.mockImplementation(() => new Promise((resolve) => {
+			release = resolve;
+		}));
+		const { run, pi } = setup({ entries: laggingBranch() });
+		const pending = run("u2");
+
+		await vi.advanceTimersByTimeAsync(HOOK_CATCH_UP_DEADLINE_MS);
+		await pending;
+		release([observation("cccccccccccc", { sourceEntryIds: ["t1", "a2"] })]);
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+	});
+
+	it("keeps the observations recorded before the deadline", async () => {
+		vi.useFakeTimers();
+		const firstObs = observation("cccccccccccc", { sourceEntryIds: ["t1"], tokenCount: 12 });
+		mockAgents.runObserver
+			.mockResolvedValueOnce([firstObs])
+			.mockImplementationOnce(() => new Promise(() => {}));
+		const { run, pi } = setup({ entries: laggingBranch("x".repeat(4000)), observerChunkMaxTokens: 256 });
+		const pending = run("u2");
+
+		await vi.advanceTimersByTimeAsync(HOOK_CATCH_UP_DEADLINE_MS);
+		const result = await pending as any;
+
+		expect(pi.appendEntry).toHaveBeenCalledTimes(1);
+		expect(result.compaction.firstKeptEntryId).toBe("a2");
+		expect(result.compaction.details.observations.map((obs: { id: string }) => obs.id)).toContain("cccccccccccc");
+	});
+
+	it("abort signal during catch-up returns { cancel: true } and does not throw", async () => {
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		mockAgents.runObserver.mockImplementation(({ signal }: { signal: AbortSignal }) => new Promise((_, reject) => {
+			signal.addEventListener("abort", () => reject(new Error("aborted")));
+		}));
+		const { run, pi } = setup({ entries: laggingBranch(), signal: controller.signal });
+		const pending = run("u2");
+		await vi.advanceTimersByTimeAsync(0);
+
+		controller.abort();
+
+		await expect(pending).resolves.toEqual({ cancel: true });
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("cancels when the signal aborts while an observer that ignores abort is still pending", async () => {
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		mockAgents.runObserver.mockImplementation(() => new Promise(() => {}));
+		const { run } = setup({ entries: laggingBranch(), signal: controller.signal });
+		const pending = run("u2");
+		await vi.advanceTimersByTimeAsync(0);
+
+		controller.abort();
+
+		await expect(pending).resolves.toEqual({ cancel: true });
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("cancels without running catch-up when the signal is already aborted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const { run, runtime } = setup({ entries: laggingBranch(), signal: controller.signal });
+
+		await expect(run("u2")).resolves.toEqual({ cancel: true });
+		expect(runtime.resolveModel).not.toHaveBeenCalled();
+		expect(runtime.compactHookInFlight).toBe(false);
+	});
+
+	it("clears the deadline timer on the normal path", async () => {
+		vi.useFakeTimers();
+		mockAgents.runObserver.mockResolvedValueOnce([observation("cccccccccccc", { sourceEntryIds: ["t1", "a2"] })]);
+		const { run } = setup({ entries: laggingBranch() });
+
+		const result = await run("u2") as any;
+
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("keeps the retained tail and warns when the catch-up itself throws", async () => {
+		const { run, runtime, ctx } = setup({ entries: laggingBranch() });
+		runtime.resolveModel.mockRejectedValueOnce(new Error("registry exploded"));
+
+		const result = await run("u2") as any;
+
+		expect(result.compaction.firstKeptEntryId).toBe("a1");
+		expect(warningsOf(ctx).some((message) => message.includes("registry exploded"))).toBe(true);
+	});
+
+	it("falls back to Pi's cut with a model-free summary and warns when the hook body throws", async () => {
+		const { run, ctx, runtime } = setup({ entries: laggingBranch(), ensureConfigError: new Error("config on fire") });
+
+		const result = await run("u2") as any;
+
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.tokensBefore).toBe(123);
+		expect(result.compaction.summary.length).toBeGreaterThan(0);
+		expect(warningsOf(ctx).some((message) => message.includes("config on fire"))).toBe(true);
+		expect(runtime.compactHookInFlight).toBe(false);
+	});
+
+	it("does not throw when the UI itself fails while warning", async () => {
+		const { run, ctx } = setup({ entries: laggingBranch(), resolveOk: false });
+		ctx.ui.notify.mockImplementation(() => {
+			throw new Error("ui gone");
+		});
+
+		const result = await run("u2") as any;
+
+		expect(result.compaction.firstKeptEntryId).toBe("a1");
 	});
 });

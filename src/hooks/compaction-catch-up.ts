@@ -21,8 +21,10 @@ import {
 export type CatchUpResult = {
 	/** Observer chunks that recorded observations. */
 	chunksRecorded: number;
-	/** Why catch-up stopped before covering the whole gap, if it did. */
-	stoppedBecause?: "max_chunks" | "empty" | "error" | "model_unavailable" | "aborted";
+	/** Why catch-up stopped before covering the whole gap, if it did. `deadline` is set by the hook that enforces the time limit. */
+	stoppedBecause?: "max_chunks" | "empty" | "error" | "model_unavailable" | "aborted" | "deadline";
+	/** Cause behind `model_unavailable`. */
+	reason?: string;
 };
 
 export type CatchUpArgs = {
@@ -43,7 +45,8 @@ export type CatchUpArgs = {
  * Each recorded chunk advances the observation frontier; the caller re-resolves
  * the cut afterwards. A chunk that yields no observations, fails, or hits the
  * chunk cap stops the catch-up and the remaining gap is handled as before
- * (retained or delegated). Nothing is ever appended for a failed chunk.
+ * (retained, or described in a model-free summary). Nothing is ever appended
+ * for a failed chunk, or once `signal` has aborted.
  */
 export async function catchUpObserver(args: CatchUpArgs): Promise<CatchUpResult> {
 	const { pi, runtime, ctx, entries, gap, maxChunks, signal } = args;
@@ -58,7 +61,7 @@ export async function catchUpObserver(args: CatchUpArgs): Promise<CatchUpResult>
 	});
 	if (!resolved.ok) {
 		debugLog("compaction.catch_up.model_unavailable", { reason: resolved.reason });
-		return { ...result, stoppedBecause: "model_unavailable" };
+		return { ...result, stoppedBecause: "model_unavailable", reason: resolved.reason };
 	}
 
 	const contextWindow = (resolved.model as { contextWindow?: number }).contextWindow;
@@ -113,6 +116,10 @@ export async function catchUpObserver(args: CatchUpArgs): Promise<CatchUpResult>
 			return { ...result, stoppedBecause: "error" };
 		}
 
+		// A model call that ignores the abort signal may still resolve after
+		// the hook's deadline or the user's cancel; its result must not be
+		// appended once the hook has moved on.
+		if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
 		const data = observations && observations.length > 0 ? buildObservationsRecordedData(observations, coversUpToId) : undefined;
 		if (!data) {
 			debugLog("compaction.catch_up.empty", { chunkIndex, coversUpToId });
