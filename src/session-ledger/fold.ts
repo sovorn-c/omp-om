@@ -1,4 +1,4 @@
-import { resetBoundaryIndex } from "./progress.js";
+import { entryIndexById, resetBoundaryIndex } from "./progress.js";
 import {
 	isObservationsDroppedData,
 	isObservationsRecordedData,
@@ -47,20 +47,24 @@ function isCustomEntry(entry: Entry, customType: string): boolean {
  * Unknown custom entries, old V2 entries, invalid V3-shaped data, and compaction details are ignored.
  * Observations and reflections use first-valid-record-wins semantics. Drops are tombstones and are
  * retained even when the dropped id is unknown at the time of folding. Entries at or before the
- * latest `reset_boundary` are ignored.
+ * latest `reset_boundary` are ignored, and so are records appended after it whose coverage marker
+ * points at or before it (a worker run that was in flight across `/clear`).
  */
 export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): FoldedLedger {
 	const observationsById = new Map<string, Observation>();
 	const reflectionsById = new Map<string, Reflection>();
 	const droppedObservationIds = new Set<string>();
 	const endIdx = foldEndIndex(entries, options.upToEntryId);
+	const floor = resetBoundaryIndex(entries);
+	const indexes = entryIndexById(entries);
+	const coversAfterFloor = (coversUpToId: string) => (indexes.get(coversUpToId) ?? -1) > floor;
 
-	for (let i = resetBoundaryIndex(entries) + 1; i <= endIdx; i++) {
+	for (let i = floor + 1; i <= endIdx; i++) {
 		const entry = entries[i];
 		if (!entry) continue;
 
 		if (isCustomEntry(entry, OM_OBSERVATIONS_RECORDED)) {
-			if (!isObservationsRecordedData(entry.data)) continue;
+			if (!isObservationsRecordedData(entry.data) || !coversAfterFloor(entry.data.coversUpToId)) continue;
 			for (const observation of entry.data.observations) {
 				if (!observationsById.has(observation.id)) {
 					observationsById.set(observation.id, observation);
@@ -70,7 +74,7 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 		}
 
 		if (isCustomEntry(entry, OM_REFLECTIONS_RECORDED)) {
-			if (!isReflectionsRecordedData(entry.data)) continue;
+			if (!isReflectionsRecordedData(entry.data) || !coversAfterFloor(entry.data.coversUpToId)) continue;
 			for (const reflection of entry.data.reflections) {
 				if (!reflectionsById.has(reflection.id)) {
 					reflectionsById.set(reflection.id, reflection);
@@ -80,7 +84,7 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 		}
 
 		if (isCustomEntry(entry, OM_OBSERVATIONS_DROPPED)) {
-			if (!isObservationsDroppedData(entry.data)) continue;
+			if (!isObservationsDroppedData(entry.data) || !coversAfterFloor(entry.data.coversUpToId)) continue;
 			for (const observationId of entry.data.observationIds) {
 				droppedObservationIds.add(observationId);
 			}

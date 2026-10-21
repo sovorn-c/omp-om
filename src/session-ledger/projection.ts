@@ -70,16 +70,15 @@ function coverageIndex(entry: Entry & { data: { coversUpToId: string } }, indexe
 	return indexes.get(entry.data.coversUpToId) ?? -1;
 }
 
-function isAtOrBefore(index: number, boundaryIndex: number): boolean {
-	return index >= 0 && boundaryIndex >= 0 && index <= boundaryIndex;
-}
-
+/** Covered strictly after the reset floor: a run in flight across `/clear` may cover pre-clear source. */
 function isCoveredAtOrBefore(
 	entry: Entry & { data: { coversUpToId: string } },
 	indexes: Map<string, number>,
 	boundaryIndex: number,
+	floor: number,
 ): boolean {
-	return isAtOrBefore(coverageIndex(entry, indexes), boundaryIndex);
+	const index = coverageIndex(entry, indexes);
+	return index > floor && boundaryIndex >= 0 && index <= boundaryIndex;
 }
 
 function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Projection {
@@ -96,7 +95,7 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 
 	for (let i = floor + 1; i < entries.length; i++) {
 		const entry = entries[i];
-		if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary)) {
+		if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary, floor)) {
 			for (const observation of entry.data.observations) {
 				if (observationsById.has(observation.id)) continue;
 				observationsById.add(observation.id);
@@ -105,7 +104,7 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 			continue;
 		}
 
-		if (isReflectionsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, reflectionsBoundary)) {
+		if (isReflectionsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, reflectionsBoundary, floor)) {
 			for (const reflection of entry.data.reflections) {
 				if (reflectionsById.has(reflection.id)) continue;
 				reflectionsById.add(reflection.id);
@@ -114,7 +113,7 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 			continue;
 		}
 
-		if (isObservationsDroppedEntry(entry) && isCoveredAtOrBefore(entry, indexes, dropsBoundary)) {
+		if (isObservationsDroppedEntry(entry) && isCoveredAtOrBefore(entry, indexes, dropsBoundary, floor)) {
 			for (const observationId of entry.data.observationIds) droppedObservationIds.add(observationId);
 		}
 	}

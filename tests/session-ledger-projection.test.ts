@@ -301,10 +301,30 @@ describe("reset_boundary floor in projections", () => {
 			observationsDroppedEntry("om-drop", { observationIds: ["bbbbbbbbbbbb"], coversUpToId: "raw-1" }),
 			textCustomMessage("raw-1", "aaaa"),
 			resetBoundary("rb-1"),
-			observationsRecordedEntry("om-2", { observations: [after], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
+			observationsRecordedEntry("om-2", { observations: [after], coversUpToId: "raw-2" }),
 		];
 
 		expect(fullProjection(entries).observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+	});
+
+	it("records appended after the boundary by a run that covers pre-boundary source are ignored", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			resetBoundary("rb-1"),
+			textCustomMessage("raw-2", "bbbb"),
+			observationsRecordedEntry("om-late", { observations: [before], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-r-late", { reflections: [refBefore], coversUpToId: "raw-1" }),
+			observationsDroppedEntry("om-drop-late", { observationIds: ["bbbbbbbbbbbb"], coversUpToId: "raw-1" }),
+			observationsRecordedEntry("om-2", { observations: [after], coversUpToId: "raw-2" }),
+		];
+
+		const full = fullProjection(entries);
+		expect(full.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(full.reflections).toEqual([]);
+		const compaction = buildCompactionProjection(entries, "raw-2", { observationsPoolMaxTokens: 1 });
+		expect(compaction.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(compaction.reflections).toEqual([]);
 	});
 
 	it("visible projection ignores compaction details from before the boundary", () => {

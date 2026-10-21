@@ -49,7 +49,7 @@ Overflow recovery (`reason: "overflow"`) never moves the cut back, because that 
 
 ## `/clear` and `reset_boundary`
 
-`/clear` appends a `reset_boundary` entry. omp-om treats the latest one as a floor: entries at or before it are ignored for catch-up, coverage and the rendered summary, so memory from before `/clear` does not leak into a fresh context. This is implemented in `src/session-ledger/progress.ts` and `fold.ts` and covered by unit tests; it was not exercised in the smoke runs.
+`/clear` appends a `reset_boundary` entry. omp-om treats the latest one as a floor: entries at or before it are ignored for catch-up, coverage and the rendered summary, so memory from before `/clear` does not leak into a fresh context. A worker run that was already in flight when you cleared may still append its record after the boundary; records whose coverage marker points at or before the boundary are ignored too. This is implemented in `src/session-ledger/progress.ts`, `fold.ts` and `projection.ts` and covered by unit tests; it was not exercised in the smoke runs.
 
 ## Commands and tool
 

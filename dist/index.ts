@@ -349,11 +349,14 @@ function foldLedger(entries, options = {}) {
   const reflectionsById = /* @__PURE__ */ new Map();
   const droppedObservationIds = /* @__PURE__ */ new Set();
   const endIdx = foldEndIndex(entries, options.upToEntryId);
-  for (let i = resetBoundaryIndex(entries) + 1; i <= endIdx; i++) {
+  const floor = resetBoundaryIndex(entries);
+  const indexes = entryIndexById(entries);
+  const coversAfterFloor = (coversUpToId) => (indexes.get(coversUpToId) ?? -1) > floor;
+  for (let i = floor + 1; i <= endIdx; i++) {
     const entry = entries[i];
     if (!entry) continue;
     if (isCustomEntry(entry, OM_OBSERVATIONS_RECORDED)) {
-      if (!isObservationsRecordedData(entry.data)) continue;
+      if (!isObservationsRecordedData(entry.data) || !coversAfterFloor(entry.data.coversUpToId)) continue;
       for (const observation of entry.data.observations) {
         if (!observationsById.has(observation.id)) {
           observationsById.set(observation.id, observation);
@@ -362,7 +365,7 @@ function foldLedger(entries, options = {}) {
       continue;
     }
     if (isCustomEntry(entry, OM_REFLECTIONS_RECORDED)) {
-      if (!isReflectionsRecordedData(entry.data)) continue;
+      if (!isReflectionsRecordedData(entry.data) || !coversAfterFloor(entry.data.coversUpToId)) continue;
       for (const reflection of entry.data.reflections) {
         if (!reflectionsById.has(reflection.id)) {
           reflectionsById.set(reflection.id, reflection);
@@ -371,7 +374,7 @@ function foldLedger(entries, options = {}) {
       continue;
     }
     if (isCustomEntry(entry, OM_OBSERVATIONS_DROPPED)) {
-      if (!isObservationsDroppedData(entry.data)) continue;
+      if (!isObservationsDroppedData(entry.data) || !coversAfterFloor(entry.data.coversUpToId)) continue;
       for (const observationId of entry.data.observationIds) {
         droppedObservationIds.add(observationId);
       }
@@ -413,11 +416,9 @@ function boundaryIndex(entries, indexes, boundary) {
 function coverageIndex(entry, indexes) {
   return indexes.get(entry.data.coversUpToId) ?? -1;
 }
-function isAtOrBefore(index, boundaryIndex2) {
-  return index >= 0 && boundaryIndex2 >= 0 && index <= boundaryIndex2;
-}
-function isCoveredAtOrBefore(entry, indexes, boundaryIndex2) {
-  return isAtOrBefore(coverageIndex(entry, indexes), boundaryIndex2);
+function isCoveredAtOrBefore(entry, indexes, boundaryIndex2, floor) {
+  const index = coverageIndex(entry, indexes);
+  return index > floor && boundaryIndex2 >= 0 && index <= boundaryIndex2;
 }
 function foldProjection(entries, options) {
   const indexes = entryIndexById2(entries);
@@ -432,7 +433,7 @@ function foldProjection(entries, options) {
   const droppedObservationIds = /* @__PURE__ */ new Set();
   for (let i = floor + 1; i < entries.length; i++) {
     const entry = entries[i];
-    if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary)) {
+    if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary, floor)) {
       for (const observation of entry.data.observations) {
         if (observationsById.has(observation.id)) continue;
         observationsById.add(observation.id);
@@ -440,7 +441,7 @@ function foldProjection(entries, options) {
       }
       continue;
     }
-    if (isReflectionsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, reflectionsBoundary)) {
+    if (isReflectionsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, reflectionsBoundary, floor)) {
       for (const reflection of entry.data.reflections) {
         if (reflectionsById.has(reflection.id)) continue;
         reflectionsById.add(reflection.id);
@@ -448,7 +449,7 @@ function foldProjection(entries, options) {
       }
       continue;
     }
-    if (isObservationsDroppedEntry(entry) && isCoveredAtOrBefore(entry, indexes, dropsBoundary)) {
+    if (isObservationsDroppedEntry(entry) && isCoveredAtOrBefore(entry, indexes, dropsBoundary, floor)) {
       for (const observationId of entry.data.observationIds) droppedObservationIds.add(observationId);
     }
   }

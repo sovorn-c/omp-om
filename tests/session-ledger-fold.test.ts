@@ -131,4 +131,22 @@ describe("session-ledger V3 folding", () => {
 		expect(folded.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
 		expect(folded.reflections).toEqual([]);
 	});
+
+	it("ignores records appended after the boundary whose coverage points before it", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			resetBoundary("rb-1"),
+			textCustomMessage("raw-2", "bbbb"),
+			observationsRecordedEntry("om-late", { observations: [observation("aaaaaaaaaaaa")], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-r-late", { reflections: [reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"])], coversUpToId: "raw-1" }),
+			observationsDroppedEntry("om-drop-late", { observationIds: ["bbbbbbbbbbbb"], coversUpToId: "raw-1" }),
+			observationsRecordedEntry("om-2", { observations: [observation("bbbbbbbbbbbb")], coversUpToId: "raw-2" }),
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(folded.reflections).toEqual([]);
+		expect(folded.droppedObservationIds.size).toBe(0);
+	});
 });
