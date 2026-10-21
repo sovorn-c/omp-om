@@ -288,9 +288,6 @@ describe("Runtime task state", () => {
 		expect(runtime.lastObserverError).toBe("observe failed");
 		expect(runtime.lastReflectorError).toBe("reflect failed");
 		expect(runtime.lastDropperError).toBe("drop failed");
-		expect(notify).toHaveBeenCalledWith("Observational memory: observer failed: observe failed", "warning");
-		expect(notify).toHaveBeenCalledWith("Observational memory: reflector failed: reflect failed", "warning");
-		expect(notify).toHaveBeenCalledWith("Observational memory: dropper failed: drop failed", "warning");
 	});
 
 	it("keeps the compaction hook flag independent of consolidation", () => {

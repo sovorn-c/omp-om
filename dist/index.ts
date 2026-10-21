@@ -1856,19 +1856,9 @@ ${conversation}`;
 
 // src/hooks/compaction-catch-up.ts
 async function catchUpObserver(args) {
-  const { pi, runtime, ctx, entries, gap, maxChunks, signal } = args;
+  const { pi, runtime, ctx, entries, gap, maxChunks, signal, resolved } = args;
   const result = { chunksRecorded: 0 };
   if (maxChunks <= 0) return result;
-  const resolved = await runtime.resolveModel({
-    models: ctx.models,
-    modelRegistry: ctx.modelRegistry,
-    hasUI: ctx.hasUI,
-    ui: ctx.ui
-  });
-  if (!resolved.ok) {
-    debugLog("compaction.catch_up.model_unavailable", { reason: resolved.reason });
-    return { ...result, stoppedBecause: "model_unavailable", reason: resolved.reason };
-  }
   const contextWindow = resolved.model.contextWindow;
   const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
   const frontierIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
@@ -1908,10 +1898,10 @@ async function catchUpObserver(args) {
       if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
       const errorMessage3 = error instanceof Error ? error.message : String(error);
       debugLog("compaction.catch_up.error", { chunkIndex, errorMessage: errorMessage3 });
-      if (ctx.hasUI) ctx.ui.notify(`Observational memory: catch-up observer failed: ${errorMessage3}`, "warning");
-      return { ...result, stoppedBecause: "error" };
+      return { ...result, stoppedBecause: "error", reason: errorMessage3 };
     }
     if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
+    runtime.memoryFailureReason = void 0;
     const data = observations && observations.length > 0 ? buildObservationsRecordedData(observations, coversUpToId) : void 0;
     if (!data) {
       debugLog("compaction.catch_up.empty", { chunkIndex, coversUpToId });
@@ -2012,46 +2002,47 @@ function debugContext(runtime, ctx) {
     runId: `compaction-${Date.now().toString(36)}`
   };
 }
-async function catchUpWithDeadline(args, signal) {
+function delegateCompaction(ctx, runtime, reason) {
+  runtime.memoryFailureReason = reason;
+  warn(ctx, `Observational memory: ${reason}. Memory updates are unavailable; using omp's normal compaction.`);
+  return void 0;
+}
+async function withCompactionDeadline(signal, ctx, runtime, work) {
   const controller = new AbortController();
   let interrupt;
   const interrupted = new Promise((resolve) => {
     interrupt = resolve;
   });
-  const stop = (stoppedBecause) => {
+  const onAbort = () => {
+    interrupt({ cancel: true });
     controller.abort();
-    interrupt({ chunksRecorded: 0, stoppedBecause });
   };
-  const onAbort = () => stop("aborted");
-  const timer = setTimeout(() => stop("deadline"), HOOK_CATCH_UP_DEADLINE_MS);
-  if (signal?.aborted) onAbort();
-  else signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => {
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    interrupt(delegateCompaction(ctx, runtime, `memory work reached the ${HOOK_CATCH_UP_DEADLINE_MS / 1e3}s hook deadline`));
+    controller.abort();
+  }, HOOK_CATCH_UP_DEADLINE_MS);
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
-    return await Promise.race([
-      catchUpObserver({
-        ...args,
-        maxChunks: args.runtime.config.compactionCatchUpMaxChunks,
-        signal: controller.signal
-      }),
-      interrupted
-    ]);
-  } catch (error) {
-    return { chunksRecorded: 0, stoppedBecause: "error", reason: errorMessage(error) };
+    if (signal?.aborted) {
+      onAbort();
+      return { cancel: true };
+    }
+    return await Promise.race([interrupted, work(controller.signal)]);
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
   }
 }
-function warnCatchUpStopped(ctx, result) {
-  if (result.stoppedBecause === "deadline") {
-    warn(ctx, `Observational memory: observer catch-up reached the ${HOOK_CATCH_UP_DEADLINE_MS / 1e3}s hook deadline; compacting with the memory recorded so far`);
-  } else if (result.stoppedBecause === "model_unavailable") {
-    warn(ctx, `Observational memory: memory model unavailable: ${result.reason}; compacting without catching up the observer`);
-  } else if (result.stoppedBecause === "error" && result.reason) {
-    warn(ctx, `Observational memory: observer catch-up failed: ${result.reason}; compacting with the memory recorded so far`);
-  }
-}
 async function handleCompaction(pi, event, ctx, runtime) {
+  if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
+  const resolved = await runtime.resolveModel(ctx);
+  if (event.signal?.aborted) return { cancel: true };
+  if (!resolved.ok) return delegateCompaction(ctx, runtime, `memory model unavailable: ${resolved.reason}`);
+  if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
   const { preparation, branchEntries } = event;
   const { firstKeptEntryId, tokensBefore } = preparation;
   let entries = branchEntries;
@@ -2061,11 +2052,13 @@ async function handleCompaction(pi, event, ctx, runtime) {
   const poolMaxTokens = observationsPoolMaxTokens(runtime);
   let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
   if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !runtime.consolidationInFlight) {
-    const catchUp = await catchUpWithDeadline({ pi, runtime, ctx, entries, gap: resolution.gap }, event.signal);
+    const catchUp = await catchUpObserver({ pi, runtime, ctx, entries, gap: resolution.gap, resolved, maxChunks: runtime.config.compactionCatchUpMaxChunks, signal: event.signal });
     if (event.signal?.aborted) return { cancel: true };
     debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
-    warnCatchUpStopped(ctx, catchUp);
-    entries = ctx.sessionManager?.getBranch?.() ?? entries;
+    if (catchUp.stoppedBecause === "error") {
+      return delegateCompaction(ctx, runtime, `observer catch-up failed: ${catchUp.reason ?? "unknown error"}`);
+    }
+    entries = ctx.sessionManager.getBranch();
     resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
   }
   const summaryOptions = { maxTokens: summaryMaxTokens, observationsPoolMaxTokens: poolMaxTokens };
@@ -2140,23 +2133,7 @@ async function handleCompaction(pi, event, ctx, runtime) {
 }
 function compactAfterFailure(event, ctx, runtime, error) {
   if (event.signal?.aborted) return { cancel: true };
-  warn(ctx, `Observational memory: compaction hook failed (${errorMessage(error)}); compacting with a model-free summary`);
-  const firstKeptEntryId = event.preparation?.firstKeptEntryId;
-  if (typeof firstKeptEntryId !== "string") return { cancel: true };
-  let summary = NO_MEMORY_NOTICE;
-  let details;
-  try {
-    const entries = event.branchEntries;
-    const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
-    const options = {
-      maxTokens: resolveCompactionSummaryMaxTokens(runtime.config, contextWindow),
-      observationsPoolMaxTokens: observationsPoolMaxTokens(runtime)
-    };
-    summary = renderFallbackSummary(entries, firstKeptEntryId, options);
-    details = buildCompactionProjection(entries, firstKeptEntryId, options).details;
-  } catch {
-  }
-  return { compaction: { summary, firstKeptEntryId, tokensBefore: event.preparation.tokensBefore, details } };
+  return delegateCompaction(ctx, runtime, `compaction hook failed: ${errorMessage(error)}`);
 }
 function registerCompactionHook(pi, runtime) {
   pi.on("session_before_compact", async (event, ctx) => {
@@ -2168,7 +2145,12 @@ function registerCompactionHook(pi, runtime) {
     runtime.compactHookInFlight = true;
     try {
       runtime.ensureConfig(ctx.cwd);
-      return await withDebugLogContext(debugContext(runtime, ctx), () => handleCompaction(pi, event, ctx, runtime));
+      return await withCompactionDeadline(
+        event.signal,
+        ctx,
+        runtime,
+        (signal) => withDebugLogContext(debugContext(runtime, ctx), () => handleCompaction(pi, { ...event, signal }, ctx, runtime))
+      );
     } catch (error) {
       return compactAfterFailure(event, ctx, runtime, error);
     } finally {
@@ -2864,14 +2846,10 @@ function makeModelResolver(runtime, ctx) {
       ui: ctx.ui
     });
     if (cached.ok) {
-      runtime.resolveFailureNotified = false;
       return workerHeadersFor(ctx, cached);
     }
     debugLog(`${stage}.model_unavailable`, { reason: cached.reason });
-    if (!runtime.resolveFailureNotified && ctx.hasUI && ctx.ui) {
-      ctx.ui.notify(`Observational memory: ${stage} skipped \u2014 ${cached.reason}`, "warning");
-      runtime.resolveFailureNotified = true;
-    }
+    runtime.recordConsolidationStageError(ctx, stage, cached.reason);
     return void 0;
   };
   return { resolve };
@@ -3029,6 +3007,7 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
     }
     throw error;
   }
+  runtime.memoryFailureReason = void 0;
   if (!observations || observations.length === 0) {
     debugLog("observer.empty", { coversUpToId });
     runtime.observerEmptyBackoff = { sessionIdentity, coverageId, tokensAtEmpty: tokens };
@@ -3083,6 +3062,7 @@ async function runReflectorStage(pi, runtime, ctx, resolver) {
     maxOutputTokens: runtime.config.agentMaxTokens,
     thinkingLevel: WORKER_THINKING_LEVEL
   });
+  runtime.memoryFailureReason = void 0;
   if (!reflections) return { outcome: "continue", sameRunReflections: [] };
   const data = buildReflectionsRecordedData(reflections, observationCoverageId);
   if (!data) return { outcome: "continue", sameRunReflections: [] };
@@ -3151,6 +3131,7 @@ async function runDropperStage(pi, runtime, ctx, resolver, sameRunReflections, s
     maxOutputTokens: runtime.config.agentMaxTokens,
     thinkingLevel: WORKER_THINKING_LEVEL
   });
+  runtime.memoryFailureReason = void 0;
   const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
   const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : void 0;
   debugLog("dropper.append", {
@@ -3199,7 +3180,8 @@ var Runtime = class {
   consolidationPromise = null;
   consolidationPhase;
   compactHookInFlight = false;
-  resolveFailureNotified = false;
+  /** Set by failed memory work; only a completed worker request clears it. */
+  memoryFailureReason;
   lastObserverError;
   lastReflectorError;
   lastDropperError;
@@ -3332,7 +3314,7 @@ var Runtime = class {
     this.lastObserverError = void 0;
     this.lastReflectorError = void 0;
     this.lastDropperError = void 0;
-    const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
+    const promise = this.launchTrackedTask(ctx, work, () => {
       this.consolidationInFlight = false;
       this.consolidationPhase = void 0;
       if (this.consolidationPromise === promise) this.consolidationPromise = null;
@@ -3345,19 +3327,25 @@ var Runtime = class {
     if (phase === "observer") this.lastObserverError = message;
     if (phase === "reflector") this.lastReflectorError = message;
     if (phase === "dropper") this.lastDropperError = message;
-    if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
+    const reason = `${phase} failed: ${message}`;
+    const alreadyNotified = this.memoryFailureReason === reason;
+    this.memoryFailureReason = reason;
+    if (!alreadyNotified && ctx.hasUI && ctx.ui) {
+      try {
+        ctx.ui.notify(`Observational memory: ${reason} (model "${this.config.model}"). Memory updates stopped for this pass; you can continue working. omp will use normal compaction until a worker request succeeds.`, "warning");
+      } catch {
+      }
+    }
     return message;
   }
-  launchTrackedTask(ctx, label, work, onFinally) {
-    const hasUI = ctx.hasUI;
-    const ui = ctx.ui;
+  launchTrackedTask(ctx, work, onFinally) {
     return (async () => {
       let errorMessage3;
       try {
         await work();
       } catch (error) {
         errorMessage3 = error instanceof Error ? error.message : String(error);
-        if (hasUI && ui) ui.notify(`Observational memory: ${label} failed: ${errorMessage3}`, "warning");
+        this.recordConsolidationStageError(ctx, this.consolidationPhase ?? "observer", errorMessage3);
       } finally {
         onFinally(errorMessage3);
       }

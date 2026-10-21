@@ -74,9 +74,7 @@ function setup(args: {
 			compactionSummaryMaxTokens: args.compactionSummaryMaxTokens,
 		},
 		compactHookInFlight: false,
-		resolveModel: vi.fn(() => {
-			throw new Error("resolveModel must not be called");
-		}),
+		resolveModel: vi.fn(async () => ({ ok: true, model: { contextWindow: 65536 }, apiKey: "test" })),
 		ensureConfig: vi.fn(),
 	};
 	registerCompactionHook(pi as any, runtime as any);

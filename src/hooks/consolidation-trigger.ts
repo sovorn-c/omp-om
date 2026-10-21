@@ -180,14 +180,10 @@ function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): ModelResolv
 			ui: ctx.ui,
 		});
 		if (cached.ok) {
-			runtime.resolveFailureNotified = false;
 			return workerHeadersFor(ctx, cached);
 		}
 		debugLog(`${stage}.model_unavailable`, { reason: cached.reason });
-		if (!runtime.resolveFailureNotified && ctx.hasUI && ctx.ui) {
-			ctx.ui.notify(`Observational memory: ${stage} skipped — ${cached.reason}`, "warning");
-			runtime.resolveFailureNotified = true;
-		}
+		runtime.recordConsolidationStageError(ctx, stage, cached.reason);
 		return undefined;
 	};
 
@@ -392,6 +388,7 @@ async function runObserverStage(
 		}
 		throw error;
 	}
+	runtime.memoryFailureReason = undefined;
 	if (!observations || observations.length === 0) {
 		// Deliberate empty: routine info, not a warning, and back off re-fires
 		// over the same span (#23).
@@ -458,6 +455,7 @@ async function runReflectorStage(
 		maxOutputTokens: runtime.config.agentMaxTokens,
 		thinkingLevel: WORKER_THINKING_LEVEL,
 	});
+	runtime.memoryFailureReason = undefined;
 	if (!reflections) return { outcome: "continue", sameRunReflections: [] };
 
 	const data = buildReflectionsRecordedData(reflections, observationCoverageId);
@@ -540,6 +538,7 @@ async function runDropperStage(
 		maxOutputTokens: runtime.config.agentMaxTokens,
 		thinkingLevel: WORKER_THINKING_LEVEL,
 	});
+	runtime.memoryFailureReason = undefined;
 	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
 	const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
 	debugLog("dropper.append", {

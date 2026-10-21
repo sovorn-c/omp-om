@@ -125,7 +125,8 @@ export class Runtime {
 	consolidationPromise: Promise<void> | null = null;
 	consolidationPhase: ConsolidationPhase | undefined;
 	compactHookInFlight = false;
-	resolveFailureNotified = false;
+	/** Set by failed memory work; only a completed worker request clears it. */
+	memoryFailureReason: string | undefined;
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;
 	lastDropperError: string | undefined;
@@ -325,7 +326,7 @@ export class Runtime {
 		this.lastObserverError = undefined;
 		this.lastReflectorError = undefined;
 		this.lastDropperError = undefined;
-		const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
+		const promise = this.launchTrackedTask(ctx, work, () => {
 			this.consolidationInFlight = false;
 			this.consolidationPhase = undefined;
 			if (this.consolidationPromise === promise) this.consolidationPromise = null;
@@ -339,25 +340,31 @@ export class Runtime {
 		if (phase === "observer") this.lastObserverError = message;
 		if (phase === "reflector") this.lastReflectorError = message;
 		if (phase === "dropper") this.lastDropperError = message;
-		if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
+		const reason = `${phase} failed: ${message}`;
+		const alreadyNotified = this.memoryFailureReason === reason;
+		this.memoryFailureReason = reason;
+		if (!alreadyNotified && ctx.hasUI && ctx.ui) {
+			try {
+				ctx.ui.notify(`Observational memory: ${reason} (model "${this.config.model}"). Memory updates stopped for this pass; you can continue working. omp will use normal compaction until a worker request succeeds.`, "warning");
+			} catch {
+				// A notification failure must not reject background work.
+			}
+		}
 		return message;
 	}
 
 	private launchTrackedTask(
 		ctx: LaunchCtx,
-		label: string,
 		work: () => Promise<void>,
 		onFinally: (error: string | undefined) => void,
 	): Promise<void> {
-		const hasUI = ctx.hasUI;
-		const ui = ctx.ui;
 		return (async () => {
 			let errorMessage: string | undefined;
 			try {
 				await work();
 			} catch (error) {
 				errorMessage = error instanceof Error ? error.message : String(error);
-				if (hasUI && ui) ui.notify(`Observational memory: ${label} failed: ${errorMessage}`, "warning");
+				this.recordConsolidationStageError(ctx, this.consolidationPhase ?? "observer", errorMessage);
 			} finally {
 				onFinally(errorMessage);
 			}

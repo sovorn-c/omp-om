@@ -30,9 +30,7 @@ function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number;
 		},
 		compactHookInFlight: args.compactHookInFlight ?? false,
 		observerPromise: new Promise(() => {}),
-		resolveModel: vi.fn(() => {
-			throw new Error("resolveModel must not be called");
-		}),
+		resolveModel: vi.fn(async () => ({ ok: true, model: { contextWindow: 65536 }, apiKey: "test" })),
 		ensureConfig: vi.fn(),
 	};
 	registerCompactionHook(pi as any, runtime as any);
@@ -61,7 +59,6 @@ describe("V3 compaction hook", () => {
 		expect(result.compaction.firstKeptEntryId).toBe("raw-1");
 		expect(result.compaction.tokensBefore).toBe(123);
 		expect(result.compaction.summary).toContain("No observational memory was recorded");
-		expect(runtime.resolveModel).not.toHaveBeenCalled();
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(runtime.compactHookInFlight).toBe(false);
 	});
@@ -149,7 +146,7 @@ describe("V3 compaction hook", () => {
 		expect(result.compaction.summary).toContain("No observational memory was recorded");
 	});
 
-	it("does not wait for worker promises or call model resolution", async () => {
+	it("does not wait for worker promises", async () => {
 		const entries = [textCustomMessage("raw-1", "aaaa")];
 		const { run, runtime } = setup({ entries });
 
@@ -159,7 +156,6 @@ describe("V3 compaction hook", () => {
 		]);
 
 		expect(result).toMatchObject({ compaction: { firstKeptEntryId: "raw-1" } });
-		expect(runtime.resolveModel).not.toHaveBeenCalled();
 	});
 
 	it("cancels duplicate in-flight compaction and notifies the UI", async () => {

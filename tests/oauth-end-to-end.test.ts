@@ -218,17 +218,16 @@ describe("OAuth provider end-to-end consolidation", () => {
 		});
 		await runtime.consolidationPromise;
 
-		const skipped = notices.find((message) => message.includes("skipped"));
-		expect(skipped).toBe(
-			'Observational memory: observer skipped — authentication failed for provider "openai-codex" — OAuth credentials may have expired; run \'/login openai-codex\' to re-authenticate',
-		);
+		const warning = notices.find((message) => message.includes("/login openai-codex"));
+		expect(warning).toContain("normal compaction");
+		expect(runtime.memoryFailureReason).toContain("authentication failed");
 		expect(appended).toEqual([]);
 
 		// eslint-disable-next-line no-console
 		console.log([
 			"",
 			"── Expired-OAuth user notice ──────────────────────────────────",
-			skipped,
+			warning,
 			"───────────────────────────────────────────────────────────────",
 		].join("\n"));
 	});

@@ -161,15 +161,15 @@ describe("compaction hook synchronous catch-up", () => {
 		expect(result.compaction.firstKeptEntryId).toBe("a1");
 	});
 
-	it("falls back to retaining the tail and warns when the observer fails", async () => {
+	it("delegates to native compaction and warns when the observer fails", async () => {
 		mockAgents.runObserver.mockRejectedValueOnce(new Error("Connection error."));
 		const { run, pi, ctx } = setup({ entries: laggingBranch() });
 
 		const result = await run("u2") as any;
 
 		expect(pi.appendEntry).not.toHaveBeenCalled();
-		expect(result.compaction.firstKeptEntryId).toBe("a1");
-		expect(ctx.ui.notify).toHaveBeenCalledWith("Observational memory: catch-up observer failed: Connection error.", "warning");
+		expect(result).toBeUndefined();
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Connection error."), "warning");
 	});
 
 	it("covers one chunk when the chunk cap stops it, then retains the rest", async () => {
@@ -205,7 +205,7 @@ describe("compaction hook synchronous catch-up", () => {
 
 		const result = await run("u2") as any;
 
-		expect(runtime.resolveModel).not.toHaveBeenCalled();
+		expect(runtime.resolveModel).toHaveBeenCalledTimes(1);
 		expect(mockAgents.runObserver).not.toHaveBeenCalled();
 		expect(result.compaction.firstKeptEntryId).toBe("a1");
 	});
@@ -215,7 +215,7 @@ describe("compaction hook synchronous catch-up", () => {
 
 		const result = await run("u2") as any;
 
-		expect(runtime.resolveModel).not.toHaveBeenCalled();
+		expect(runtime.resolveModel).toHaveBeenCalledTimes(1);
 		expect(result.compaction.firstKeptEntryId).toBe("a1");
 	});
 
@@ -235,18 +235,15 @@ describe("compaction hook synchronous catch-up", () => {
 		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["cccccccccccc"]);
 	});
 
-	it("returns a compaction when the ledger is empty and the model is unresolved, and warns", async () => {
+	it("delegates to native compaction when the ledger is empty and the model is unresolved", async () => {
 		const entries = [userMessage("u0", "plan the migration"), assistantMessage("a0"), userMessage("u1")];
 		const { run, ctx } = setup({ entries, resolveOk: false });
 
 		const result = await run("u1") as any;
 
 		expect(mockAgents.runObserver).not.toHaveBeenCalled();
-		expect(result.compaction.summary.length).toBeGreaterThan(0);
-		expect(result.compaction.firstKeptEntryId).toBe("u1");
-		expect(result.compaction.summary).toContain("plan the migration");
-		const warnings = ctx.ui.notify.mock.calls.filter(([, level]: [string, string]) => level === "warning");
-		expect(warnings.some(([message]: [string]) => message.includes("memory model unavailable: no model"))).toBe(true);
+		expect(result).toBeUndefined();
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("no model"), "warning");
 	});
 
 	it("falls back when the memory model is unavailable", async () => {
@@ -256,7 +253,7 @@ describe("compaction hook synchronous catch-up", () => {
 
 		expect(mockAgents.runObserver).not.toHaveBeenCalled();
 		expect(pi.appendEntry).not.toHaveBeenCalled();
-		expect(result.compaction.firstKeptEntryId).toBe("a1");
+		expect(result).toBeUndefined();
 	});
 });
 
@@ -348,9 +345,7 @@ describe("compaction hook deadline and failure handling", () => {
 		await vi.advanceTimersByTimeAsync(1);
 		const result = await pending as any;
 
-		expect(HOOK_CATCH_UP_DEADLINE_MS).toBe(20_000);
-		expect(result.compaction.firstKeptEntryId).toBe("a1");
-		expect(result.compaction.summary.length).toBeGreaterThan(0);
+		expect(result).toBeUndefined();
 		expect(observerSignal?.aborted).toBe(true);
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(warningsOf(ctx).some((message) => message.includes("deadline"))).toBe(true);
@@ -387,8 +382,8 @@ describe("compaction hook deadline and failure handling", () => {
 		const result = await pending as any;
 
 		expect(pi.appendEntry).toHaveBeenCalledTimes(1);
-		expect(result.compaction.firstKeptEntryId).toBe("a2");
-		expect(result.compaction.details.observations.map((obs: { id: string }) => obs.id)).toContain("cccccccccccc");
+		expect(result).toBeUndefined();
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, expect.objectContaining({ coversUpToId: "t1" }));
 	});
 
 	it("abort signal during catch-up returns { cancel: true } and does not throw", async () => {
@@ -443,24 +438,22 @@ describe("compaction hook deadline and failure handling", () => {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
-	it("keeps the retained tail and warns when the catch-up itself throws", async () => {
+	it("delegates and warns when model resolution throws", async () => {
 		const { run, runtime, ctx } = setup({ entries: laggingBranch() });
 		runtime.resolveModel.mockRejectedValueOnce(new Error("registry exploded"));
 
 		const result = await run("u2") as any;
 
-		expect(result.compaction.firstKeptEntryId).toBe("a1");
+		expect(result).toBeUndefined();
 		expect(warningsOf(ctx).some((message) => message.includes("registry exploded"))).toBe(true);
 	});
 
-	it("falls back to Pi's cut with a model-free summary and warns when the hook body throws", async () => {
+	it("delegates and warns when the hook body throws", async () => {
 		const { run, ctx, runtime } = setup({ entries: laggingBranch(), ensureConfigError: new Error("config on fire") });
 
 		const result = await run("u2") as any;
 
-		expect(result.compaction.firstKeptEntryId).toBe("u2");
-		expect(result.compaction.tokensBefore).toBe(123);
-		expect(result.compaction.summary.length).toBeGreaterThan(0);
+		expect(result).toBeUndefined();
 		expect(warningsOf(ctx).some((message) => message.includes("config on fire"))).toBe(true);
 		expect(runtime.compactHookInFlight).toBe(false);
 	});
@@ -473,6 +466,6 @@ describe("compaction hook deadline and failure handling", () => {
 
 		const result = await run("u2") as any;
 
-		expect(result.compaction.firstKeptEntryId).toBe("a1");
+		expect(result).toBeUndefined();
 	});
 });

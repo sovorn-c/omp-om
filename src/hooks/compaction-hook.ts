@@ -10,9 +10,8 @@ import { resolveCompactionMaxRetainedTokens, resolveCompactionSummaryMaxTokens }
 import { estimateStringTokens } from "../tokens.js";
 import { debugLog, withDebugLogContext, type DebugLogContext } from "../debug-log.js";
 import type { OmpExtensionContext, Runtime } from "../runtime.js";
-import { catchUpObserver, type CatchUpResult } from "./compaction-catch-up.js";
+import { catchUpObserver } from "./compaction-catch-up.js";
 import {
-	NO_MEMORY_NOTICE,
 	OM_OBSERVATIONS_RECORDED,
 	buildCompactionProjection,
 	compactionRangeStartIndex,
@@ -29,11 +28,7 @@ import {
 	type UnobservedSourceSpan,
 } from "../session-ledger/index.js";
 
-/**
- * Hard limit on synchronous observer catch-up inside the hook. omp aborts an
- * extension handler after 30s; the hook must return a compaction before that,
- * or omp runs its own LLM summary. Not configurable.
- */
+/** Bound hook work below omp's 30s handler timeout so native fallback can run. */
 export const HOOK_CATCH_UP_DEADLINE_MS = 20_000;
 
 const DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 20_000;
@@ -182,61 +177,50 @@ function debugContext(runtime: Runtime, ctx: ExtensionContext): DebugLogContext 
 
 type HookResult =
 	| { compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number; details?: MemoryDetails } }
-	| { cancel: true };
+	| { cancel: true }
+	| undefined;
 
-/**
- * Run observer catch-up under the hook deadline. The model call gets an
- * `AbortController` chained to the event's signal and aborted at the deadline;
- * the timer and the listener are released on every path, and the losing branch
- * of the race is always observed by `Promise.race`, so it cannot surface as an
- * unhandled rejection. Never throws: a catch-up failure becomes a result.
- */
-async function catchUpWithDeadline(
-	args: { pi: ExtensionAPI; runtime: Runtime; ctx: OmpExtensionContext; entries: Entry[]; gap: UnobservedSourceSpan },
+function delegateCompaction(ctx: OmpExtensionContext, runtime: Runtime, reason: string): undefined {
+	runtime.memoryFailureReason = reason;
+	warn(ctx, `Observational memory: ${reason}. Memory updates are unavailable; using omp's normal compaction.`);
+	return undefined;
+}
+
+async function withCompactionDeadline(
 	signal: AbortSignal | undefined,
-): Promise<CatchUpResult> {
+	ctx: OmpExtensionContext,
+	runtime: Runtime,
+	work: (signal: AbortSignal) => Promise<HookResult>,
+): Promise<HookResult> {
 	const controller = new AbortController();
-	let interrupt!: (result: CatchUpResult) => void;
-	const interrupted = new Promise<CatchUpResult>((resolve) => {
-		interrupt = resolve;
-	});
-	const stop = (stoppedBecause: "deadline" | "aborted") => {
+	// The published ES2022 target does not expose Promise.withResolvers.
+	let interrupt!: (result: HookResult) => void;
+	const interrupted = new Promise<HookResult>((resolve) => { interrupt = resolve; });
+	const onAbort = () => {
+		interrupt({ cancel: true });
 		controller.abort();
-		interrupt({ chunksRecorded: 0, stoppedBecause });
 	};
-	const onAbort = () => stop("aborted");
-	const timer = setTimeout(() => stop("deadline"), HOOK_CATCH_UP_DEADLINE_MS);
-	if (signal?.aborted) onAbort();
-	else signal?.addEventListener("abort", onAbort, { once: true });
-
+	const timer = setTimeout(() => {
+		if (signal?.aborted) { onAbort(); return; }
+		interrupt(delegateCompaction(ctx, runtime, `memory work reached the ${HOOK_CATCH_UP_DEADLINE_MS / 1000}s hook deadline`));
+		controller.abort();
+	}, HOOK_CATCH_UP_DEADLINE_MS);
+	signal?.addEventListener("abort", onAbort, { once: true });
 	try {
-		return await Promise.race([
-			catchUpObserver({
-				...args,
-				maxChunks: args.runtime.config.compactionCatchUpMaxChunks,
-				signal: controller.signal,
-			}),
-			interrupted,
-		]);
-	} catch (error) {
-		return { chunksRecorded: 0, stoppedBecause: "error", reason: errorMessage(error) };
+		if (signal?.aborted) { onAbort(); return { cancel: true }; }
+		return await Promise.race([interrupted, work(controller.signal)]);
 	} finally {
 		clearTimeout(timer);
 		signal?.removeEventListener("abort", onAbort);
 	}
 }
 
-function warnCatchUpStopped(ctx: OmpExtensionContext, result: CatchUpResult): void {
-	if (result.stoppedBecause === "deadline") {
-		warn(ctx, `Observational memory: observer catch-up reached the ${HOOK_CATCH_UP_DEADLINE_MS / 1000}s hook deadline; compacting with the memory recorded so far`);
-	} else if (result.stoppedBecause === "model_unavailable") {
-		warn(ctx, `Observational memory: memory model unavailable: ${result.reason}; compacting without catching up the observer`);
-	} else if (result.stoppedBecause === "error" && result.reason) {
-		warn(ctx, `Observational memory: observer catch-up failed: ${result.reason}; compacting with the memory recorded so far`);
-	}
-}
-
 async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEvent, ctx: OmpExtensionContext, runtime: Runtime): Promise<HookResult> {
+	if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
+	const resolved = await runtime.resolveModel(ctx);
+	if (event.signal?.aborted) return { cancel: true };
+	if (!resolved.ok) return delegateCompaction(ctx, runtime, `memory model unavailable: ${resolved.reason}`);
+	if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
 	const { preparation, branchEntries } = event;
 	const { firstKeptEntryId, tokensBefore } = preparation;
 	let entries = branchEntries as Entry[];
@@ -255,13 +239,14 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 		&& runtime.config.compactionCatchUpMaxChunks > 0
 		&& !runtime.consolidationInFlight
 	) {
-		const catchUp = await catchUpWithDeadline({ pi, runtime, ctx, entries, gap: resolution.gap }, event.signal);
+		const catchUp = await catchUpObserver({ pi, runtime, ctx, entries, gap: resolution.gap, resolved, maxChunks: runtime.config.compactionCatchUpMaxChunks, signal: event.signal });
 		if (event.signal?.aborted) return { cancel: true };
 		debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
-		warnCatchUpStopped(ctx, catchUp);
-		// Chunks recorded before a deadline or error are durable; re-read the
-		// branch so the cut and the folded memory include them.
-		entries = (ctx.sessionManager?.getBranch?.() as Entry[] | undefined) ?? entries;
+		if (catchUp.stoppedBecause === "error") {
+			return delegateCompaction(ctx, runtime, `observer catch-up failed: ${catchUp.reason ?? "unknown error"}`);
+		}
+		// Completed chunks are durable; re-read the branch before resolving the cut.
+		entries = ctx.sessionManager.getBranch() as Entry[];
 		resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
 	}
 
@@ -347,32 +332,9 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 	};
 }
 
-/**
- * Last resort when the hook body itself threw: Pi's own cut and a summary
- * rendered from whatever still works. Only a signal abort or an event with no
- * usable `preparation` can cancel instead of compacting.
- */
 function compactAfterFailure(event: SessionBeforeCompactEvent, ctx: OmpExtensionContext, runtime: Runtime, error: unknown): HookResult {
 	if (event.signal?.aborted) return { cancel: true };
-	warn(ctx, `Observational memory: compaction hook failed (${errorMessage(error)}); compacting with a model-free summary`);
-	const firstKeptEntryId = event.preparation?.firstKeptEntryId;
-	if (typeof firstKeptEntryId !== "string") return { cancel: true };
-
-	let summary = NO_MEMORY_NOTICE;
-	let details: MemoryDetails | undefined;
-	try {
-		const entries = event.branchEntries as Entry[];
-		const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
-		const options = {
-			maxTokens: resolveCompactionSummaryMaxTokens(runtime.config, contextWindow),
-			observationsPoolMaxTokens: observationsPoolMaxTokens(runtime),
-		};
-		summary = renderFallbackSummary(entries, firstKeptEntryId, options);
-		details = buildCompactionProjection(entries, firstKeptEntryId, options).details;
-	} catch {
-		// Keep the fixed notice: a compaction without memory beats none.
-	}
-	return { compaction: { summary, firstKeptEntryId, tokensBefore: event.preparation.tokensBefore, details } };
+	return delegateCompaction(ctx, runtime, `compaction hook failed: ${errorMessage(error)}`);
 }
 
 export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void {
@@ -386,7 +348,9 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 		runtime.compactHookInFlight = true;
 		try {
 			runtime.ensureConfig(ctx.cwd);
-			return await withDebugLogContext(debugContext(runtime, ctx), () => handleCompaction(pi, event, ctx, runtime));
+			return await withCompactionDeadline(event.signal, ctx, runtime, (signal) =>
+				withDebugLogContext(debugContext(runtime, ctx), () => handleCompaction(pi, { ...event, signal }, ctx, runtime)),
+			);
 		} catch (error) {
 			return compactAfterFailure(event, ctx, runtime, error);
 		} finally {

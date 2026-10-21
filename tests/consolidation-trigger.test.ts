@@ -87,7 +87,7 @@ function setup(args: {
 		},
 		consolidationInFlight: args.consolidationInFlight ?? false,
 		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
-		resolveFailureNotified: false,
+		memoryFailureReason: undefined as string | undefined,
 		lastObserverError: undefined as string | undefined,
 		lastReflectorError: undefined as string | undefined,
 		lastDropperError: undefined as string | undefined,
@@ -608,7 +608,6 @@ describe("V3 consolidation trigger", () => {
 		await runLaunchedWork();
 
 		expect(pi.appendEntry).not.toHaveBeenCalled();
-		expect(ctx.ui.notify).toHaveBeenCalledWith("Observational memory: observer skipped — no model", "warning");
 	});
 
 	it("re-reads branch so observer append can unblock reflector in the same consolidation run", async () => {

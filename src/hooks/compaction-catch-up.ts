@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runObserver } from "../agents/observer/agent.js";
 import { WORKER_THINKING_LEVEL, resolveObserverChunkMaxTokens, resolveWorkerMemoryMaxTokens } from "../config.js";
 import { debugLog } from "../debug-log.js";
-import type { OmpExtensionContext, Runtime } from "../runtime.js";
+import type { OmpExtensionContext, ResolveResult, Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVATIONS_RECORDED,
@@ -21,9 +21,9 @@ import {
 export type CatchUpResult = {
 	/** Observer chunks that recorded observations. */
 	chunksRecorded: number;
-	/** Why catch-up stopped before covering the whole gap, if it did. `deadline` is set by the hook that enforces the time limit. */
-	stoppedBecause?: "max_chunks" | "empty" | "error" | "model_unavailable" | "aborted" | "deadline";
-	/** Cause behind `model_unavailable`. */
+	/** Why catch-up stopped before covering the whole gap, if it did. */
+	stoppedBecause?: "max_chunks" | "empty" | "error" | "aborted";
+	/** Cause behind a request error. */
 	reason?: string;
 };
 
@@ -34,6 +34,7 @@ export type CatchUpArgs = {
 	entries: Entry[];
 	gap: UnobservedSourceSpan;
 	maxChunks: number;
+	resolved: Extract<ResolveResult, { ok: true }>;
 	signal?: AbortSignal;
 };
 
@@ -44,25 +45,14 @@ export type CatchUpArgs = {
  * is in flight, so the memory model call does not compete with the session.
  * Each recorded chunk advances the observation frontier; the caller re-resolves
  * the cut afterwards. A chunk that yields no observations, fails, or hits the
- * chunk cap stops the catch-up and the remaining gap is handled as before
- * (retained, or described in a model-free summary). Nothing is ever appended
- * for a failed chunk, or once `signal` has aborted.
+ * chunk cap stops the catch-up. Request failures delegate to native compaction;
+ * healthy incomplete coverage can be retained or rendered within the budget.
+ * Nothing is appended for a failed chunk, or once `signal` has aborted.
  */
 export async function catchUpObserver(args: CatchUpArgs): Promise<CatchUpResult> {
-	const { pi, runtime, ctx, entries, gap, maxChunks, signal } = args;
+	const { pi, runtime, ctx, entries, gap, maxChunks, signal, resolved } = args;
 	const result: CatchUpResult = { chunksRecorded: 0 };
 	if (maxChunks <= 0) return result;
-
-	const resolved = await runtime.resolveModel({
-		models: ctx.models,
-		modelRegistry: ctx.modelRegistry,
-		hasUI: ctx.hasUI,
-		ui: ctx.ui,
-	});
-	if (!resolved.ok) {
-		debugLog("compaction.catch_up.model_unavailable", { reason: resolved.reason });
-		return { ...result, stoppedBecause: "model_unavailable", reason: resolved.reason };
-	}
 
 	const contextWindow = (resolved.model as { contextWindow?: number }).contextWindow;
 	const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
@@ -113,14 +103,14 @@ export async function catchUpObserver(args: CatchUpArgs): Promise<CatchUpResult>
 			if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			debugLog("compaction.catch_up.error", { chunkIndex, errorMessage });
-			if (ctx.hasUI) ctx.ui.notify(`Observational memory: catch-up observer failed: ${errorMessage}`, "warning");
-			return { ...result, stoppedBecause: "error" };
+			return { ...result, stoppedBecause: "error", reason: errorMessage };
 		}
 
 		// A model call that ignores the abort signal may still resolve after
 		// the hook's deadline or the user's cancel; its result must not be
 		// appended once the hook has moved on.
 		if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
+		runtime.memoryFailureReason = undefined;
 		const data = observations && observations.length > 0 ? buildObservationsRecordedData(observations, coversUpToId) : undefined;
 		if (!data) {
 			debugLog("compaction.catch_up.empty", { chunkIndex, coversUpToId });
