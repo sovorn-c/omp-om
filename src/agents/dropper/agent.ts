@@ -1,5 +1,5 @@
 import type { AgentLoopConfig, AgentTool } from "@earendil-works/pi-agent-core";
-import { agentLoop, type WorkerAgentContext, type WorkerAgentLoop } from "../agent-loop.js";
+import { agentLoop, createTurnCap, type WorkerAgentContext, type WorkerAgentLoop } from "../agent-loop.js";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
@@ -253,8 +253,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 	};
 	const reasoning = (model as { reasoning?: unknown }).reasoning;
 	const thinkingLevel = args.thinkingLevel ?? "low";
-	const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-	let turnCount = 0;
+	const cap = createTurnCap(args.maxTurns, signal);
 	const config: AgentLoopConfig = {
 		model,
 		apiKey,
@@ -262,30 +261,26 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 		env,
 		maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
 		convertToLlm: (msgs) => msgs as Message[],
-		toolExecution: "sequential",
 		...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-		...(effectiveMaxTurns !== undefined
-			? {
-				finishTurn: (turn) => {
-					if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return;
-					return ++turnCount >= effectiveMaxTurns ? { action: "end" } : undefined;
-				},
-			}
-			: {}),
 	};
 
 	const loop = args.agentLoop ?? agentLoop;
-	const stream = loop(prompts, context, config, signal);
+	const stream = loop(prompts, context, config, cap.signal);
 	let streamError: { stopReason: string; errorMessage?: string } | undefined;
-	for await (const event of stream) {
-		// Tool execution collects candidate ids.
-		logAgentStreamError("dropper", event);
-		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
-		if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-			streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+	try {
+		for await (const event of stream) {
+			// Tool execution collects candidate ids. The abort that enforces the turn cap is deliberate.
+			cap.observe(event);
+			logAgentStreamError("dropper", event);
+			const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
+			if (!cap.capped && message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+				streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+			}
 		}
+		await stream.result();
+	} finally {
+		cap.dispose();
 	}
-	await stream.result();
 	const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
 	if (droppedIds.length === 0 && streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
 	const reason = droppedIds.length > 0

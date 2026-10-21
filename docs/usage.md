@@ -15,7 +15,7 @@ A bad file never throws. A file that is not valid JSON, or not a JSON object, is
 | `reflectAfterTokens` | `20000` | Same, for reflection runs, counted over observed tokens. |
 | `observationsPoolMaxTokens` | `20000` | Active observation budget. When the observations folded at compaction reach it, the compaction is a *full fold* (see below). |
 | `observationsPoolTargetTokens` | half of max | Target the dropper trims toward. Ignored if not smaller than max. |
-| `agentMaxTurns` | `16` | Turn cap for each background worker loop. |
+| `agentMaxTurns` | `16` | Turn cap for each worker loop. omp has no per-turn hook, so omp-om counts completed assistant turns and aborts the loop at the cap; records made before the abort are kept and the abort is not reported as an error. |
 | `agentMaxTokens` | `32000` | Output token request for worker loops, clamped to the model's own `maxTokens`. Lower it for local servers with a small context. |
 | `compactionCatchUpMaxChunks` | `2` | Observer chunks the hook may run synchronously before a compaction. `0` disables catch-up. |
 | `observerChunkMaxTokens` | derived | Cap on one observer chunk (minimum `256`). Unset: a fifth of the memory model's context window, or `60000` if unknown. |

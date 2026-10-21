@@ -1318,6 +1318,36 @@ import {
   agentLoop as hostAgentLoop
 } from "@earendil-works/pi-agent-core";
 var agentLoop = hostAgentLoop;
+function createTurnCap(maxTurns, parent) {
+  if (maxTurns === void 0 || maxTurns <= 0) {
+    return { signal: parent, capped: false, observe() {
+    }, dispose() {
+    } };
+  }
+  const controller = new AbortController();
+  const forward = () => controller.abort(parent?.reason);
+  if (parent?.aborted) forward();
+  else parent?.addEventListener("abort", forward, { once: true });
+  let turns = 0;
+  let capped = false;
+  return {
+    signal: controller.signal,
+    get capped() {
+      return capped;
+    },
+    observe(event) {
+      if (event.type !== "turn_end") return;
+      const stopReason = event.message?.stopReason;
+      if (stopReason === "error" || stopReason === "aborted") return;
+      if (++turns < maxTurns) return;
+      capped = true;
+      controller.abort();
+    },
+    dispose() {
+      parent?.removeEventListener("abort", forward);
+    }
+  };
+}
 
 // src/agents/observer/agent.ts
 import { Type } from "@earendil-works/pi-ai";
@@ -1790,8 +1820,7 @@ ${conversation}`;
   };
   const reasoning = model.reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : void 0;
-  let turnCount = 0;
+  const cap = createTurnCap(args.maxTurns, signal);
   const config = {
     model,
     apiKey,
@@ -1799,27 +1828,24 @@ ${conversation}`;
     env,
     maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
     convertToLlm: (msgs) => msgs,
-    toolExecution: "sequential",
-    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {},
-    ...effectiveMaxTurns !== void 0 ? {
-      finishTurn: (turn) => {
-        if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return;
-        turnCount++;
-        return turnCount >= effectiveMaxTurns ? { action: "end" } : void 0;
-      }
-    } : {}
+    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}
   };
   const loop = args.agentLoop ?? agentLoop;
-  const stream = loop(prompts, context, config, signal);
+  const stream = loop(prompts, context, config, cap.signal);
   let streamError;
-  for await (const event of stream) {
-    logAgentStreamError("observer", event);
-    const message = event.message;
-    if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-      streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+  try {
+    for await (const event of stream) {
+      cap.observe(event);
+      logAgentStreamError("observer", event);
+      const message = event.message;
+      if (!cap.capped && message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+        streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+      }
     }
+    await stream.result();
+  } finally {
+    cap.dispose();
   }
-  await stream.result();
   if (accumulated.size === 0) {
     if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
     return void 0;
@@ -2458,8 +2484,7 @@ This maximum is a hard upper bound, not a target. Drop fewer or none if fewer ob
   };
   const reasoning = model.reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : void 0;
-  let turnCount = 0;
+  const cap = createTurnCap(args.maxTurns, signal);
   const config = {
     model,
     apiKey,
@@ -2467,26 +2492,24 @@ This maximum is a hard upper bound, not a target. Drop fewer or none if fewer ob
     env,
     maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
     convertToLlm: (msgs) => msgs,
-    toolExecution: "sequential",
-    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {},
-    ...effectiveMaxTurns !== void 0 ? {
-      finishTurn: (turn) => {
-        if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return;
-        return ++turnCount >= effectiveMaxTurns ? { action: "end" } : void 0;
-      }
-    } : {}
+    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}
   };
   const loop = args.agentLoop ?? agentLoop;
-  const stream = loop(prompts, context, config, signal);
+  const stream = loop(prompts, context, config, cap.signal);
   let streamError;
-  for await (const event of stream) {
-    logAgentStreamError("dropper", event);
-    const message = event.message;
-    if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-      streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+  try {
+    for await (const event of stream) {
+      cap.observe(event);
+      logAgentStreamError("dropper", event);
+      const message = event.message;
+      if (!cap.capped && message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+        streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+      }
     }
+    await stream.result();
+  } finally {
+    cap.dispose();
   }
-  await stream.result();
   const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
   if (droppedIds.length === 0 && streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
   const reason = droppedIds.length > 0 ? "selected_nonempty" : toolCallCount === 0 ? "no_tool_call" : proposedDropIds.length === 0 ? "all_filtered" : "selected_empty";
@@ -2726,8 +2749,7 @@ Crystallize any missing durable facts or patterns into new reflections. If nothi
   };
   const reasoning = model.reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : void 0;
-  let turnCount = 0;
+  const cap = createTurnCap(args.maxTurns, signal);
   const config = {
     model,
     apiKey,
@@ -2735,26 +2757,24 @@ Crystallize any missing durable facts or patterns into new reflections. If nothi
     env,
     maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
     convertToLlm: (msgs) => msgs,
-    toolExecution: "sequential",
-    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {},
-    ...effectiveMaxTurns !== void 0 ? {
-      finishTurn: (turn) => {
-        if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return;
-        return ++turnCount >= effectiveMaxTurns ? { action: "end" } : void 0;
-      }
-    } : {}
+    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}
   };
   const loop = args.agentLoop ?? agentLoop;
-  const stream = loop(prompts, context, config, signal);
+  const stream = loop(prompts, context, config, cap.signal);
   let streamError;
-  for await (const event of stream) {
-    logAgentStreamError("reflector", event);
-    const message = event.message;
-    if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-      streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+  try {
+    for await (const event of stream) {
+      cap.observe(event);
+      logAgentStreamError("reflector", event);
+      const message = event.message;
+      if (!cap.capped && message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+        streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+      }
     }
+    await stream.result();
+  } finally {
+    cap.dispose();
   }
-  await stream.result();
   const acceptedReflections = Array.from(accumulated.values());
   if (acceptedReflections.length === 0 && streamError) throw new ReflectorStreamError(streamError.stopReason, streamError.errorMessage);
   const afterCoverageById = reflectionCoverageMap(observations, [...reflections, ...acceptedReflections]);

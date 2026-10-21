@@ -10,6 +10,7 @@ import { hashId } from "../src/ids.js";
 import { estimateStringTokens } from "../src/tokens.js";
 import { AGENT_LOOP_MAX_TOKENS } from "../src/model-budget.js";
 import { observation, reflection } from "./fixtures/session.js";
+import { endlessTurnLoop, type EndlessLoopProbe } from "./fixtures/turn-loop.js";
 
 function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void): any {
 	return ((prompts: any[], context: any, config: any) => ({
@@ -70,16 +71,23 @@ describe("runReflector maxTokens clamping", () => {
 		expect(config().maxTokens).toBe(AGENT_LOOP_MAX_TOKENS);
 	});
 
-	it("uses finishTurn as a reflector turn cap without overriding hard exits", async () => {
+	it("stops the loop at maxTurns by aborting its signal, without an error", async () => {
+		const probe: EndlessLoopProbe = { turns: 0 };
+
+		const result = await runReflector({ ...args, model: {} as any, agentLoop: endlessTurnLoop(probe), maxTurns: 3 });
+
+		expect(probe.turns).toBe(3);
+		expect(probe.signal?.aborted).toBe(true);
+		expect(result).toBeUndefined();
+	});
+
+	it("does not set loop config the host ignores", async () => {
 		const { loop, config } = captureLoopConfig();
 
 		await runReflector({ ...args, model: {} as any, agentLoop: loop, maxTurns: 2 });
 
-		expect(config().finishTurn).toBeTypeOf("function");
-		expect(config().finishTurn({ message: { stopReason: "error" } })).toBeUndefined();
-		expect(config().finishTurn({ message: { stopReason: "aborted" } })).toBeUndefined();
-		expect(config().finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
-		expect(config().finishTurn({ message: { stopReason: "stop" } })).toEqual({ action: "end" });
+		expect(config()).not.toHaveProperty("finishTurn");
+		expect(config()).not.toHaveProperty("toolExecution");
 	});
 });
 

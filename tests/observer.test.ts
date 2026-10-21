@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { normalizeSourceEntryIds, OBSERVATION_TIMESTAMP_PATTERN, ObserverStreamError, runObserver } from "../src/agents/observer/agent.js";
 import { AGENT_LOOP_MAX_TOKENS } from "../src/model-budget.js";
+import { endlessTurnLoop, type EndlessLoopProbe } from "./fixtures/turn-loop.js";
 
 function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void, events: any[] = []): any {
 	return ((prompts: any[], context: any, config: any) => ({
@@ -188,19 +189,38 @@ describe("runObserver", () => {
 		expect(observations?.[0].content).toBe("Kept despite later error");
 	});
 
-	it("uses finishTurn as an observer turn cap without overriding hard exits", async () => {
-		let finishTurn: any;
+	it("stops the loop at maxTurns by aborting its signal, without an error", async () => {
+		const probe: EndlessLoopProbe = { turns: 0 };
+		const parent = new AbortController();
+
+		const result = await runObserver({ ...baseArgs, agentLoop: endlessTurnLoop(probe), maxTurns: 3, signal: parent.signal });
+
+		expect(probe.turns).toBe(3);
+		expect(probe.signal?.aborted).toBe(true);
+		expect(parent.signal.aborted).toBe(false);
+		expect(result).toBeUndefined();
+	});
+
+	it("forwards a caller abort to the capped loop signal", async () => {
+		const probe: EndlessLoopProbe = { turns: 0 };
+		const parent = new AbortController();
+		parent.abort();
+
+		await expect(runObserver({ ...baseArgs, agentLoop: endlessTurnLoop(probe), maxTurns: 3, signal: parent.signal })).rejects.toBeInstanceOf(ObserverStreamError);
+
+		expect(probe.turns).toBe(0);
+	});
+
+	it("does not set loop config the host ignores", async () => {
+		let seen: any;
 		const loop = fakeAgentLoop((_prompts, _context, config) => {
-			finishTurn = config.finishTurn;
+			seen = config;
 		});
 
 		await runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
 
-		expect(finishTurn).toBeTypeOf("function");
-		expect(finishTurn({ message: { stopReason: "error" } })).toBeUndefined();
-		expect(finishTurn({ message: { stopReason: "aborted" } })).toBeUndefined();
-		expect(finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
-		expect(finishTurn({ message: { stopReason: "stop" } })).toEqual({ action: "end" });
+		expect(seen).not.toHaveProperty("finishTurn");
+		expect(seen).not.toHaveProperty("toolExecution");
 	});
 
 	it("uses configured observer thinking level for reasoning models", async () => {

@@ -1,5 +1,5 @@
 import type { AgentLoopConfig, AgentTool } from "@earendil-works/pi-agent-core";
-import { agentLoop, type WorkerAgentContext, type WorkerAgentLoop } from "../agent-loop.js";
+import { agentLoop, createTurnCap, type WorkerAgentContext, type WorkerAgentLoop } from "../agent-loop.js";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
@@ -186,8 +186,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 	};
 	const reasoning = (model as { reasoning?: unknown }).reasoning;
 	const thinkingLevel = args.thinkingLevel ?? "low";
-	const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-	let turnCount = 0;
+	const cap = createTurnCap(args.maxTurns, signal);
 	const config: AgentLoopConfig = {
 		model,
 		apiKey,
@@ -195,30 +194,26 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 		env,
 		maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
 		convertToLlm: (msgs) => msgs as Message[],
-		toolExecution: "sequential",
 		...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-		...(effectiveMaxTurns !== undefined
-			? {
-				finishTurn: (turn) => {
-					if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return;
-					return ++turnCount >= effectiveMaxTurns ? { action: "end" } : undefined;
-				},
-			}
-			: {}),
 	};
 
 	const loop = args.agentLoop ?? agentLoop;
-	const stream = loop(prompts, context, config, signal);
+	const stream = loop(prompts, context, config, cap.signal);
 	let streamError: { stopReason: string; errorMessage?: string } | undefined;
-	for await (const event of stream) {
-		// Tool execution collects records.
-		logAgentStreamError("reflector", event);
-		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
-		if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-			streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+	try {
+		for await (const event of stream) {
+			// Tool execution collects records. The abort that enforces the turn cap is deliberate.
+			cap.observe(event);
+			logAgentStreamError("reflector", event);
+			const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
+			if (!cap.capped && message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+				streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+			}
 		}
+		await stream.result();
+	} finally {
+		cap.dispose();
 	}
-	await stream.result();
 	const acceptedReflections = Array.from(accumulated.values());
 	if (acceptedReflections.length === 0 && streamError) throw new ReflectorStreamError(streamError.stopReason, streamError.errorMessage);
 	const afterCoverageById = reflectionCoverageMap(observations, [...reflections, ...acceptedReflections]);
