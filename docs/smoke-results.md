@@ -62,4 +62,4 @@ First run A: every observer call failed with `observer stream ended with stopRea
 ## Not covered
 
 - Auto-compaction by threshold (only manual compact), the `extensions:` setting route, `/clear` and `reset_boundary`, the 20 s deadline path, `-p` mode warnings.
-- `reflector running (~23,393 tokens)` appeared with a tiny ledger: stage progress is the larger of the raw estimate and provider-reported context growth, and omp's system prompt is large. Not investigated further.
+- `reflector running (~23,393 tokens)` appeared with a tiny ledger: with no coverage marker yet, the whole provider-reported context (omp's system prompt included) counted as growth. Fixed after the smoke run (`realTokensSinceAnchor` returns no baseline before the first record or compaction, so only the raw source estimate counts); covered by unit tests, not re-run live.
