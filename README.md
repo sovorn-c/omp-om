@@ -1,6 +1,6 @@
 # omp-om
 
-Observational memory for omp. It keeps a structured ledger of what happened in a session and renders that ledger as the compaction summary, so compaction does not need an LLM summary call.
+Observational memory for omp. It keeps a structured ledger of what happened in a session and renders that ledger as the compaction summary while memory work is healthy.
 
 ## What it does
 
@@ -10,11 +10,11 @@ While you work, three background workers write to the session journal:
 - **Reflector**: distills durable reflections from observations.
 - **Dropper**: drops observations that reflections already cover, to keep the pool small.
 
-When omp compacts, omp-om's `session_before_compact` hook renders the ledger as the compaction summary and returns it to omp. omp then skips its own summarizer. The hook never returns `undefined` and never declines, so omp's native summarizer is not used while omp-om is loaded. If the ledger is behind, the hook catches the observer up under a 20 second deadline. If that is not possible, it renders what it has, or a minimal model-free summary, and shows a warning when the session has a UI.
+When omp compacts, omp-om's `session_before_compact` hook normally renders the ledger and omp skips its own summarizer. If the ledger is behind, the hook can catch the observer up within a 20 second deadline. When the configured memory model cannot resolve, authenticate or complete a request, omp-om warns, stops that memory pass and returns compaction to omp's normal summarizer. Conversation can continue. A later successful worker request restores ledger compaction.
 
 ## The honest limit
 
-"No summary" means no LLM call **at compaction time**. The observer, reflector and dropper still call the configured `model` in the background, in small increments. If you want zero model calls, do not use omp-om; use omp's native `snapcompact` + `shake` instead.
+Healthy ledger compaction avoids an LLM summarization call; synchronous observer catch-up may still call the memory model. The observer, reflector and dropper also call that model in the background. During a memory outage, omp uses its normal compaction. If you want zero model calls, use omp's native `snapcompact` + `shake` instead.
 
 ## Install
 

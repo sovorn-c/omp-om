@@ -55,7 +55,10 @@ afterEach(() => vi.useRealTimers());
 
 describe("memory failure leaves native omp running", () => {
 	it("checks model availability with complete coverage and catch-up disabled", async () => {
-		const app = setup();
+		const app = setup([
+			rawMessage("raw-1", "deployment region"),
+			observationsRecordedEntry("obs", { coversUpToId: "raw-1", observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] })] }),
+		]);
 		app.runtime.config.compactionCatchUpMaxChunks = 0;
 		app.ctx.models.resolve.mockReturnValue(undefined);
 		await expect(app.compact()).resolves.toBeUndefined();

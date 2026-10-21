@@ -40,12 +40,14 @@ The summary is the ledger render: usage instructions, then `## Reflections` (whe
 
 ## Fallback ladder at compaction
 
-The hook (`src/hooks/compaction-hook.ts`) never throws and never returns `undefined`:
+The hook (`src/hooks/compaction-hook.ts`) checks memory health before supplying a ledger summary:
 
-1. **Catch up.** If the observer has not reached omp's cut, observe the gap, up to `compactionCatchUpMaxChunks` chunks, with or without a prior coverage marker, under a 20 second deadline. Chunks recorded before a deadline or error are kept.
-2. **Render the ledger so far.** If catch-up could not finish (deadline, model unavailable, error, abort), do no further observing or reflecting, and render the recorded ledger. If the unobserved tail still fits the retained budget, the cut moves back so the tail stays in context; omp-om shows an info notice.
-3. **Model-free summary.** If the tail cannot be retained, or no record fits the summary budget, the hook renders a deterministic summary with no model: a fixed header, the ledger that fits, and excerpts of the unobserved input. With an empty ledger it says no memory was recorded.
-4. **Last resort.** If the hook body itself throws, it keeps omp's cut and renders whatever still works, or a fixed notice. A signal abort cancels the compaction instead. A second compaction while one is running is cancelled as a duplicate.
+1. **Delegate during an outage.** Resolution/authentication failures, worker request failures, catch-up errors, unexpected hook errors and the 20 second deadline warn and return `undefined`, allowing omp's normal compaction. The deadline includes authentication lookup, even with complete coverage or catch-up disabled. Late catch-up results cannot append after the deadline.
+2. **Catch up while healthy.** If the observer has not reached omp's cut, observe the gap up to `compactionCatchUpMaxChunks` chunks. Completed chunks remain in the journal. An intentional empty result or chunk cap is healthy; if the remaining tail fits the budget, move the cut back to retain it and render the ledger.
+3. **Handle healthy budget limits.** If the tail cannot be retained, or no record fits the summary budget, render a deterministic summary: a fixed header, the ledger that fits and excerpts of unobserved input. With an empty ledger it says no memory was recorded. This budget fallback applies while memory work is healthy.
+4. **Preserve cancellation.** A user abort cancels compaction. A second compaction while one is running is cancelled as a duplicate.
+
+Memory failures stop the current worker pass, including its later stages. Routine scheduled passes may try again; launching a pass or resolving the model does not clear the outage. A successful observer, reflector or dropper request clears it, including a successful request that produces no records. Existing journal records remain available. Error warnings are shown even when `showWorkerNotifications` is `false`; that option controls routine progress only.
 
 ## `/clear` and `reset_boundary`
 
@@ -63,20 +65,20 @@ Warnings appear only when the session has a UI (`ctx.hasUI`). In the smoke runs 
 
 | Message | Cause and fix |
 | --- | --- |
-| `observer skipped — memory model "…" did not resolve to an available model; set "model" in omp-om.json` | `model` is unset, misspelled, or has no credentials. Shown once per session. Workers skip; compaction still works. Fix `model`. |
-| `memory model unavailable: …; compacting without catching up the observer` | Same cause, hit during a compaction. The ledger recorded so far is rendered. |
-| `observer catch-up reached the 20s hook deadline; compacting with the memory recorded so far` | The model was too slow to reach the cut. Use a faster `model`, or lower `observeAfterTokens` so the background observer stays ahead. |
-| `observer catch-up failed: …; compacting with the memory recorded so far` | The observer call failed during catch-up. The reason text comes from the provider. |
-| `observer has not reached N source entries (~T tokens) before the compaction cut and they cannot be retained (…); compacting with a model-free summary of the memory so far` | Step 3 of the ladder. The reason in parentheses says why (`no observation coverage`, retained budget exceeded, nothing observed can be compacted). |
-| `observer has not reached … before the compaction cut; keeping them in context until they are observed` | Info only. Step 2: the cut moved back to keep the tail. |
-| `no memory record fits the ~N-token summary budget; using a truncated model-free summary` | `compactionSummaryMaxTokens` is too small for the smallest record. Raise it. |
-| `compaction hook failed (…); compacting with a model-free summary` | Unexpected error in the hook. Enable `debugLog` and report it. |
+| `observer failed: memory model "…" did not resolve …` | Fix `model` or credentials. This memory pass stops; omp uses normal compaction until a worker request succeeds. Repeated identical background failures are deduplicated while the same outage remains active. |
+| `memory model unavailable: …; … using omp's normal compaction` | Resolution or authentication failed during preflight. omp receives no compaction override. |
+| `memory work reached the 20s hook deadline` | Authentication or catch-up took too long. omp receives normal compaction; late worker results are ignored. |
+| `observer catch-up failed: …` | The catch-up request failed. The provider reason is included; omp performs normal compaction. |
+| `observer has not reached N source entries …; compacting with a model-free summary …` | Healthy budget fallback: the unobserved tail cannot be retained. |
+| `observer has not reached …; keeping them in context until they are observed` | Info only: the cut moved back to retain the tail. |
+| `no memory record fits the ~N-token summary budget; using a truncated model-free summary` | Raise `compactionSummaryMaxTokens`. |
+| `compaction hook failed: …` | Unexpected hook error. omp receives normal compaction. Enable `debugLog` and report it. |
 | `another compaction is already in progress; cancelling duplicate` | A second `session_before_compact` arrived while one was running. |
-| `<phase> failed: …` | A background worker (observer, reflector, dropper) failed. The ledger simply does not advance. |
+| `<phase> failed: …; … Memory updates stopped for this pass …` | A background observer, reflector or dropper failed. Conversation can continue; compaction delegates to omp until a worker succeeds. |
 
 Other checks:
 
 - **Config warnings.** A bad `omp-om.json` (malformed file, removed key, invalid `model`) is reported by `/om:status` under "Config warnings", naming the file. Check the JSON and the key names against the table above.
-- **No `om.*` entries appear.** Check `/om:status` for a last worker error, look for the `observer skipped` warning (memory model did not resolve), and check that `passive` is not on.
+- **No `om.*` entries appear.** Check `/om:status` for a last worker error, look for a memory failure warning, and check that `passive` is not on.
 - **Zero model calls wanted.** Not possible with omp-om; see the honest limit in the README.
 - **Mnemopi cost.** If Mnemopi's `llmMode` is `smol` and omp-om's `model` is `@smol`, both call the same model and share its cost and rate limits.

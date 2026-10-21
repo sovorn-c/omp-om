@@ -2,6 +2,8 @@
 
 Date: 2026-10-21. Built with `npm run build`, loaded with `omp -e /Users/sovorn/dev/omp/plugin/omp-om`.
 
+The results below describe the original implementation. Its outage behavior (result 4) is superseded by the native compaction handoff update; see the new verification section added for that update.
+
 ## Route
 
 `omp -p` does not expand slash commands, so the runs used `omp --mode rpc` driven over stdin by a throwaway Node script in a scratch dir (`mktemp -d`, deleted afterwards). Per run: 5 prompts (about 15 s apart so background workers could run), then the RPC `compact` command, which is omp's manual compaction (the same path as `/compact`).
@@ -63,3 +65,23 @@ First run A: every observer call failed with `observer stream ended with stopRea
 
 - Auto-compaction by threshold (only manual compact), the `extensions:` setting route, `/clear` and `reset_boundary`, the 20 s deadline path, `-p` mode warnings.
 - `reflector running (~23,393 tokens)` appeared with a tiny ledger: with no coverage marker yet, the whole provider-reported context (omp's system prompt included) counted as growth. Fixed after the smoke run (`realTokensSinceAnchor` returns no baseline before the first record or compaction, so only the raw source estimate counts); covered by unit tests, not re-run live.
+
+## Native compaction handoff update
+
+Verified on 2026-10-21 after commit `438b684`, using isolated `omp --mode rpc` sessions. Both runs configured `magpie/codex/gpt-6-luna:medium` for the session and memory workers. A local forwarding proxy rejected any other model and enforced/logged medium effort for every forwarded request, including native summarization. There were 11 forwarded requests in the healthy run and 7 in the final outage run; failed memory requests used a separate closed localhost port.
+
+The harness loaded a scratch copy of `src/` through an extension wrapper. Its only source change set `WORKER_THINKING_LEVEL` to `medium` for verification; production stays at `low` with the `@smol` model default. The fault wrapper preserved omp's original context and overrode only the memory auth result's `baseUrl`. Session/native requests kept the working endpoint. Built output was separately verified by `npm run build`.
+
+Isolation: scratch `PI_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, model registry, cwds and session directories; no real configuration writes. The overlay set `memory.backend: off`, `compaction.methodOrder: [soft]`, `compaction.keepRecentTokens: 100` and `compaction.thresholdTokens: 100000`. Routine progress notifications were enabled. Temporary harness files and processes were removed after verification.
+
+| Scenario | Observed result |
+| --- | --- |
+| Healthy observer and compaction | Three `om.observations.recorded` entries containing four observations in the successful session. Manual RPC compaction succeeded with `fromExtension: true` and `details.type: "om.folded"`. |
+| Memory endpoint refuses connections | Warning named the observer, configured Luna model and connection refusal, then stated memory updates stopped, conversation could continue and omp would use normal compaction. No observation records were appended. |
+| Conversation after the warning | A new prompt completed successfully: `We chose **eu-west-1** and **Postgres 17**.` |
+| Native compaction during outage | Manual RPC compaction succeeded with `fromExtension: false`, `method: "soft"` and no `om.folded` details. The native summary preserved eu-west-1, Postgres 17, immutable CSV sources and transaction-scoped import IDs. |
+
+The initial harness attempts exposed test-driver issues: a proxy error handler sent headers twice after the client closed an SSE stream; a progress matcher missed singular `observation`; an invalid `compact` method name needed `soft`; spreading the host context lost getter-backed fields. These were harness changes, with no product workaround.
+
+Unit verification: `npm run typecheck`, 32 test files / 365 tests, and `npm run build` passed. Regression coverage includes unresolved/auth-failed models, covered ledgers with catch-up disabled, persistent outage and successful recovery, throwing UI, concurrent failure during preflight, hook deadlines, user cancellation and late-write protection. Live recovery after reconnect, auto-compaction, deadline expiry and headless warning display were not exercised.
+
