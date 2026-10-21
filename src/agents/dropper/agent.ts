@@ -1,11 +1,11 @@
-import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentContext, AgentLoopConfig, AgentTool } from "@earendil-works/pi-agent-core";
+import { agentLoop, type WorkerAgentLoop } from "../agent-loop.js";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
 import { debugLog } from "../../debug-log.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { logAgentStreamError } from "../stream-errors.js";
-import { resolveWorkerStreamSimple, type StreamableModelRegistry, type WorkerStreamSimple } from "../worker-stream.js";
 import { reflectionToSummaryLine, type Observation, type Reflection } from "../../session-ledger/index.js";
 import { DROPPER_SYSTEM } from "./prompts.js";
 import {
@@ -55,13 +55,11 @@ interface RunDropperArgs {
 	observations: Observation[];
 	targetTokens: number;
 	signal?: AbortSignal;
-	agentLoop?: typeof agentLoop;
+	agentLoop?: WorkerAgentLoop;
 	maxTurns?: number;
 	/** Maximum output tokens for the loop (defaults to {@link AGENT_LOOP_MAX_TOKENS}). */
 	maxOutputTokens?: number;
 	thinkingLevel?: ModelThinkingLevel;
-	modelRegistry?: StreamableModelRegistry;
-	streamSimple?: WorkerStreamSimple;
 }
 
 const RELEVANCE_DROP_RANK: Record<Observation["relevance"], number> = {
@@ -276,13 +274,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 	};
 
 	const loop = args.agentLoop ?? agentLoop;
-	const stream = loop(
-		prompts,
-		context,
-		config,
-		signal,
-		resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple),
-	);
+	const stream = loop(prompts, context, config, signal);
 	let streamError: { stopReason: string; errorMessage?: string } | undefined;
 	for await (const event of stream) {
 		// Tool execution collects candidate ids.

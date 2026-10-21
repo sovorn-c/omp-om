@@ -38,10 +38,10 @@ describe("V3 recall tool", () => {
 		const pi = { registerTool: vi.fn() };
 		registerRecallTool(pi as any);
 
-		expect(RECALL_OBSERVATION_TOOL_NAME).toBe("recall");
-		expect(recallObservationTool.name).toBe("recall");
+		expect(RECALL_OBSERVATION_TOOL_NAME).toBe("om_recall");
+		expect(recallObservationTool.name).toBe("om_recall");
 		expect(recallObservationTool.label).toBe("Recall memory evidence");
-		expect(formatRecallCallForTui("aaaaaaaaaaaa")).toBe("recall aaaaaaaaaaaa");
+		expect(formatRecallCallForTui("aaaaaaaaaaaa")).toBe("om_recall aaaaaaaaaaaa");
 		expect(pi.registerTool).toHaveBeenCalledWith(recallObservationTool);
 	});
 

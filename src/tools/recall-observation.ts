@@ -13,7 +13,7 @@ import type { Observation, Reflection } from "../session-ledger/index.js";
 import { renderRecallSourceEntries, renderRecallSourceEntry } from "../serialize.js";
 import { estimateEntryTokens } from "../tokens.js";
 
-export const RECALL_OBSERVATION_TOOL_NAME = "recall";
+export const RECALL_OBSERVATION_TOOL_NAME = "om_recall";
 
 const MEMORY_ID_PATTERN = /^[a-f0-9]{12}$/;
 
@@ -408,7 +408,7 @@ export function formatRecallResultForTui(result: AgentToolResult<RecallObservati
 	const details = result.details;
 	if (!details) {
 		const text = result.content.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
-		return text || "recall";
+		return text || "om_recall";
 	}
 	const sources = sourceEntriesFromDetails(details);
 	const lines: string[] = [];
@@ -424,7 +424,7 @@ export function formatRecallResultForTui(result: AgentToolResult<RecallObservati
 }
 
 export function formatRecallCallForTui(id: string | undefined): string {
-	return `recall ${id ?? "..."}`;
+	return `om_recall ${id ?? "..."}`;
 }
 
 export function formatRecallRenderedResultForTui(result: AgentToolResult<RecallObservationToolDetails>, expanded: boolean): string {
@@ -441,19 +441,19 @@ export const recallObservationTool = defineTool({
 	description:
 		"Recover exact evidence and source context behind a compacted observational-memory observation or reflection id on the current branch. " +
 		"Use when compressed memory is important and original source context is needed before acting.",
-	promptSnippet: "Use recall(<id>) to recover exact source context behind compacted memory observations/reflections when precision matters.",
+	promptSnippet: "Use om_recall(<id>) to recover exact source context behind compacted memory observations/reflections when precision matters.",
 	promptGuidelines: [
-		"Use recall before making an important decision that depends on a compacted observation or reflection whose details are unclear.",
-		"Use recall when you need exact wording, rationale, file paths, commands, errors, commits, user constraints, or provenance behind a remembered claim.",
-		"Use recall when a broad reflection is relevant but you need its supporting observations or raw sources to continue safely.",
-		"Use recall when the user asks why you believe something, what supports a memory, or what was decided earlier.",
-		"Do not use recall as semantic search or transcript browsing; you must already have a specific 12-character memory id.",
+		"Use om_recall before making an important decision that depends on a compacted observation or reflection whose details are unclear.",
+		"Use om_recall when you need exact wording, rationale, file paths, commands, errors, commits, user constraints, or provenance behind a remembered claim.",
+		"Use om_recall when a broad reflection is relevant but you need its supporting observations or raw sources to continue safely.",
+		"Use om_recall when the user asks why you believe something, what supports a memory, or what was decided earlier.",
+		"Do not use om_recall as semantic search or transcript browsing; you must already have a specific 12-character memory id.",
 		"Do not recall every id preemptively. Recall only when exact source context will materially improve the next action.",
 	],
 	parameters: Type.Object({
 		id: Type.String({
 			pattern: "^[a-f0-9]{12}$",
-			description: "12-character lowercase hex observation or reflection id shown in compacted memory, /om:view, or a previous recall result. Must be a specific id; this tool does not search by topic.",
+			description: "12-character lowercase hex observation or reflection id shown in compacted memory, /om:view, or a previous om_recall result. Must be a specific id; this tool does not search by topic.",
 		}),
 	}),
 	renderCall(args) {

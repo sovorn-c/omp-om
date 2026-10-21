@@ -66,7 +66,7 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			const passiveLines = runtime.config.passive === true
 				? [
 					"── Mode ──",
-					"Passive: automatic memory workers disabled; manual/Pi compaction, commands, and recall remain active",
+					"Passive: automatic memory workers disabled; manual/Pi compaction, commands, and om_recall remain active",
 					"",
 				]
 				: [];

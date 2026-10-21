@@ -76,207 +76,6 @@ function observationPoolMetrics(observations, targetTokens) {
   };
 }
 
-// src/config.ts
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-var DEFAULTS = {
-  observeAfterTokens: 1e4,
-  reflectAfterTokens: 2e4,
-  compactAfterTokens: 81e3,
-  compactAfterTokensMode: "calibrated",
-  compactAfterTokensRatio: 0.68,
-  observationsPoolMaxTokens: 2e4,
-  observationsPoolTargetTokens: 1e4,
-  agentMaxTurns: 16,
-  agentMaxTokens: 32e3,
-  compactionCatchUpMaxChunks: 2,
-  consolidateWhenIdle: false,
-  showWorkerNotifications: true,
-  passive: false,
-  debugLog: false,
-  piAutoCompactionEnabled: true
-};
-var COMPACT_AFTER_TOKENS_MODE_VALUES = ["calibrated", "ratio"];
-function resolveCompactAfterTokens(config, contextWindow) {
-  if (config.compactAfterTokensMode === "ratio" && typeof contextWindow === "number" && contextWindow > 0) {
-    return Math.max(1, Math.floor(contextWindow * config.compactAfterTokensRatio));
-  }
-  return config.compactAfterTokens;
-}
-var COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 6e4;
-var COMPACTION_RETAINED_CONTEXT_RATIO = 0.5;
-function resolveCompactionMaxRetainedTokens(config, contextWindow) {
-  if (config.compactionMaxRetainedTokens !== void 0 && config.compactionMaxRetainedTokens > 0) {
-    return config.compactionMaxRetainedTokens;
-  }
-  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-    return Math.max(1, Math.floor(contextWindow * COMPACTION_RETAINED_CONTEXT_RATIO));
-  }
-  return COMPACTION_RETAINED_FALLBACK_MAX_TOKENS;
-}
-var COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS = 8e3;
-var COMPACTION_SUMMARY_CONTEXT_RATIO = 0.125;
-function resolveCompactionSummaryMaxTokens(config, contextWindow) {
-  if (config.compactionSummaryMaxTokens !== void 0 && config.compactionSummaryMaxTokens > 0) {
-    return config.compactionSummaryMaxTokens;
-  }
-  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-    return Math.max(1, Math.floor(contextWindow * COMPACTION_SUMMARY_CONTEXT_RATIO));
-  }
-  return COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS;
-}
-var WORKER_MEMORY_FALLBACK_MAX_TOKENS = 16e3;
-var WORKER_MEMORY_CONTEXT_RATIO = 0.25;
-function resolveWorkerMemoryMaxTokens(config, contextWindow) {
-  if (config.workerMemoryMaxTokens !== void 0 && config.workerMemoryMaxTokens > 0) return config.workerMemoryMaxTokens;
-  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-    return Math.max(1, Math.floor(contextWindow * WORKER_MEMORY_CONTEXT_RATIO));
-  }
-  return WORKER_MEMORY_FALLBACK_MAX_TOKENS;
-}
-var THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-var OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 6e4;
-var OBSERVER_CHUNK_MIN_TOKENS = 256;
-var OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
-function resolveObserverChunkMaxTokens(config, contextWindow) {
-  if (config.observerChunkMaxTokens !== void 0 && config.observerChunkMaxTokens > 0) {
-    return Math.max(OBSERVER_CHUNK_MIN_TOKENS, config.observerChunkMaxTokens);
-  }
-  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-    return Math.max(
-      OBSERVER_CHUNK_MIN_TOKENS,
-      Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO)
-    );
-  }
-  return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
-}
-var SETTINGS_KEY = "observational-memory";
-var PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
-function positiveIntegerOrUndefined(value) {
-  return Number.isInteger(value) && typeof value === "number" && value > 0 ? value : void 0;
-}
-function validTargetOrUndefined(value, maxTokens) {
-  const target = positiveIntegerOrUndefined(value);
-  return target !== void 0 && target < maxTokens ? target : void 0;
-}
-function derivedObservationPoolTarget(maxTokens) {
-  return Math.floor(maxTokens / 2);
-}
-function isThinkingLevel(value) {
-  return typeof value === "string" && THINKING_LEVEL_VALUES.includes(value);
-}
-function isCompactAfterTokensMode(value) {
-  return typeof value === "string" && COMPACT_AFTER_TOKENS_MODE_VALUES.includes(value);
-}
-function validRatioOrUndefined(value) {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1 ? value : void 0;
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null;
-}
-function nonEmptyString(value) {
-  return typeof value === "string" && value.length > 0 ? value : void 0;
-}
-function normalizeModel(value) {
-  if (!isRecord(value)) return void 0;
-  const provider = nonEmptyString(value.provider);
-  const id = nonEmptyString(value.id);
-  if (!provider || !id) return void 0;
-  const model = { provider, id };
-  if (isThinkingLevel(value.thinking)) model.thinking = value.thinking;
-  return model;
-}
-function normalizeSettingsConfig(value) {
-  const normalized = {};
-  const numberKeys = [
-    "observeAfterTokens",
-    "reflectAfterTokens",
-    "observerChunkMaxTokens",
-    "compactAfterTokens",
-    "compactionMaxRetainedTokens",
-    "compactionSummaryMaxTokens",
-    "workerMemoryMaxTokens",
-    "observationsPoolMaxTokens",
-    "observationsPoolTargetTokens",
-    "agentMaxTurns",
-    "agentMaxTokens"
-  ];
-  for (const key of numberKeys) {
-    const normalizedValue = positiveIntegerOrUndefined(value[key]);
-    if (normalizedValue !== void 0) normalized[key] = normalizedValue;
-  }
-  if (Number.isInteger(value.compactionCatchUpMaxChunks) && value.compactionCatchUpMaxChunks >= 0) {
-    normalized.compactionCatchUpMaxChunks = value.compactionCatchUpMaxChunks;
-  }
-  if (isCompactAfterTokensMode(value.compactAfterTokensMode)) {
-    normalized.compactAfterTokensMode = value.compactAfterTokensMode;
-  }
-  const ratio = validRatioOrUndefined(value.compactAfterTokensRatio);
-  if (ratio !== void 0) normalized.compactAfterTokensRatio = ratio;
-  if (typeof value.consolidateWhenIdle === "boolean") normalized.consolidateWhenIdle = value.consolidateWhenIdle;
-  if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
-  if (typeof value.passive === "boolean") normalized.passive = value.passive;
-  if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
-  const model = normalizeModel(value.model);
-  if (model) normalized.model = model;
-  const fallbackModel = normalizeModel(value.fallbackModel);
-  if (fallbackModel) normalized.fallbackModel = fallbackModel;
-  return normalized;
-}
-function readEnvConfig(env = process.env) {
-  const rawPassive = env[PASSIVE_ENV];
-  if (rawPassive === void 0) return {};
-  const passive = rawPassive.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(passive)) return { passive: true };
-  if (["0", "false", "no", "off"].includes(passive)) return { passive: false };
-  return {};
-}
-function readPiCompactionEnabled(path) {
-  if (!existsSync(path)) return void 0;
-  try {
-    const raw = JSON.parse(readFileSync(path, "utf-8"));
-    const compaction = raw.compaction;
-    return isRecord(compaction) && typeof compaction.enabled === "boolean" ? compaction.enabled : void 0;
-  } catch {
-    return void 0;
-  }
-}
-function readNamespacedConfig(path) {
-  if (!existsSync(path)) return {};
-  try {
-    const raw = JSON.parse(readFileSync(path, "utf-8"));
-    const nested = raw[SETTINGS_KEY];
-    return isRecord(nested) ? normalizeSettingsConfig(nested) : {};
-  } catch {
-    return {};
-  }
-}
-function loadConfig(cwd, env = process.env) {
-  const globalPath = join(getAgentDir(), "settings.json");
-  const projectPath = join(cwd, ".pi", "settings.json");
-  const globalConfig = readNamespacedConfig(globalPath);
-  const projectConfig = readNamespacedConfig(projectPath);
-  const envConfig = readEnvConfig(env);
-  const merged = {
-    ...DEFAULTS,
-    observationsPoolTargetTokens: void 0,
-    ...globalConfig,
-    ...projectConfig,
-    ...envConfig
-  };
-  const target = validTargetOrUndefined(
-    merged.observationsPoolTargetTokens,
-    merged.observationsPoolMaxTokens
-  ) ?? derivedObservationPoolTarget(merged.observationsPoolMaxTokens);
-  const piAutoCompactionEnabled = readPiCompactionEnabled(projectPath) ?? readPiCompactionEnabled(globalPath) ?? DEFAULTS.piAutoCompactionEnabled;
-  return {
-    ...merged,
-    observationsPoolTargetTokens: target,
-    piAutoCompactionEnabled
-  };
-}
-
 // src/session-ledger/types.ts
 var OM_OBSERVATIONS_RECORDED = "om.observations.recorded";
 var OM_REFLECTIONS_RECORDED = "om.reflections.recorded";
@@ -880,7 +679,7 @@ var CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in t
 
 Treat these as past records. When entries conflict, the most recent observation reflects the latest known state. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
 
-When exact source context is needed for precision or traceability, use the recall tool with the relevant observation or reflection id. This is especially useful when a reflection materially affects a decision or is too compressed to continue confidently. Do not use recall as broad search or inject raw source unless it is needed.`;
+When exact source context is needed for precision or traceability, use the om_recall tool with the relevant observation or reflection id. This is especially useful when a reflection materially affects a decision or is too compressed to continue confidently. Do not use om_recall as broad search or inject raw source unless it is needed.`;
 function observationToSummaryLine(observation) {
   return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] ${observation.content}`;
 }
@@ -977,80 +776,6 @@ function boundWorkerMemory(reflections, observations, maxTokens, options = {}) {
   };
 }
 
-// src/hooks/compaction-trigger.ts
-function compactionProgress(runtime, entries) {
-  return runtime.config.piAutoCompactionEnabled === false ? rawTokensSinceLastCompaction(entries) : observedTokensSinceLastCompaction(entries);
-}
-function progressLabel(runtime) {
-  return runtime.config.piAutoCompactionEnabled === false ? "estimated" : "observed";
-}
-function registerCompactionTrigger(pi, runtime) {
-  pi.on("agent_settled", (_event, ctx) => maybeTriggerCompaction(runtime, ctx));
-}
-function maybeTriggerCompaction(runtime, ctx) {
-  {
-    runtime.ensureConfig(ctx.cwd);
-    if (runtime.config.passive === true) return;
-    if (runtime.compactInFlight) return;
-    const entries = ctx.sessionManager?.getBranch?.();
-    if (!entries) return;
-    const progress = compactionProgress(runtime, entries);
-    const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
-    const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
-    if (progress < threshold) return;
-    const hasUI = ctx.hasUI;
-    const ui = ctx.ui;
-    if (hasUI) ui?.notify(
-      `Observational memory: compaction threshold reached (~${progress.toLocaleString()} ${progressLabel(runtime)} source tokens); triggering compaction`,
-      "info"
-    );
-    runtime.compactInFlight = true;
-    setTimeout(() => {
-      try {
-        if (!ctx.isIdle()) {
-          runtime.compactInFlight = false;
-          if (hasUI) ui?.notify(
-            "Observational memory: compaction deferred \u2014 agent became busy before compaction",
-            "info"
-          );
-          return;
-        }
-        const currentEntries = ctx.sessionManager?.getBranch?.();
-        if (!currentEntries) {
-          runtime.compactInFlight = false;
-          return;
-        }
-        const currentProgress = compactionProgress(runtime, currentEntries);
-        if (currentProgress < threshold) {
-          runtime.compactInFlight = false;
-          if (hasUI) ui?.notify(
-            "Observational memory: compaction skipped \u2014 another compaction already ran before deferred compaction",
-            "info"
-          );
-          return;
-        }
-        ctx.compact({
-          onComplete: () => {
-            runtime.compactInFlight = false;
-            if (hasUI) ui?.notify("Observational memory: compaction complete", "info");
-          },
-          onError: (error) => {
-            runtime.compactInFlight = false;
-            if (error.message === "Compaction cancelled") {
-              return;
-            }
-            if (hasUI) ui?.notify(`Observational memory: ${error.message}`, "error");
-          }
-        });
-      } catch (error) {
-        runtime.compactInFlight = false;
-        const msg = error instanceof Error ? error.message : String(error);
-        if (hasUI) ui?.notify(`Observational memory: compact threw: ${msg}`, "error");
-      }
-    }, 0);
-  }
-}
-
 // src/commands/status.ts
 function pct(current, total) {
   return total > 0 ? Math.round(current / total * 100) : 0;
@@ -1094,13 +819,10 @@ function registerStatusCommand(pi, runtime) {
       );
       const obsProgress = rawTokensSinceObservationCoverage(entries);
       const reflectionProgress = observedTokensSinceReflectionCoverage(entries);
-      const compactionProgress2 = compactionProgress(runtime, entries);
       const unobservedSinceCompaction = Math.max(0, rawTokensSinceLastCompaction(entries) - observedTokensSinceLastCompaction(entries));
-      const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
-      const compactThreshold = resolveCompactAfterTokens(runtime.config, contextWindow);
       const passiveLines = runtime.config.passive === true ? [
         "\u2500\u2500 Mode \u2500\u2500",
-        "Passive: automatic memory workers and auto-compaction disabled; manual/Pi compaction, commands, and recall remain active",
+        "Passive: automatic memory workers disabled; manual/Pi compaction, commands, and om_recall remain active",
         ""
       ] : [];
       const lines = [
@@ -1112,20 +834,21 @@ function registerStatusCommand(pi, runtime) {
         "\u2500\u2500 Activity \u2500\u2500",
         `Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
         `Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} observed tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
-        `Next compaction:  ~${compactionProgress2.toLocaleString()} / ${compactThreshold.toLocaleString()} ${progressLabel(runtime)} source tokens (${pct(compactionProgress2, compactThreshold)}%)`,
         `Observer backlog: ~${unobservedSinceCompaction.toLocaleString()} unobserved source tokens since the compaction boundary`,
         `Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
         `Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
         `Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`
       ];
-      if (runtime.consolidationInFlight || runtime.compactInFlight || runtime.compactHookInFlight) {
+      if (runtime.consolidationInFlight || runtime.compactHookInFlight) {
         lines.push("", "\u2500\u2500 In flight \u2500\u2500");
         if (runtime.consolidationInFlight) {
           const phase = runtime.consolidationPhase ? ` (${runtime.consolidationPhase})` : "";
           lines.push(`Consolidation: running${phase}`);
         }
-        if (runtime.compactInFlight) lines.push("Auto-compaction: running");
         if (runtime.compactHookInFlight) lines.push("Compaction hook: running");
+      }
+      if (runtime.configWarnings.length > 0) {
+        lines.push("", "\u2500\u2500 Config warnings \u2500\u2500", ...runtime.configWarnings);
       }
       if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastDropperError) {
         lines.push("", "\u2500\u2500 Last error \u2500\u2500");
@@ -1244,11 +967,175 @@ import {
   sessionEntryToContextMessages
 } from "@earendil-works/pi-coding-agent";
 
+// src/config.ts
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+var DEFAULTS = {
+  observeAfterTokens: 1e4,
+  reflectAfterTokens: 2e4,
+  observationsPoolMaxTokens: 2e4,
+  observationsPoolTargetTokens: 1e4,
+  agentMaxTurns: 16,
+  agentMaxTokens: 32e3,
+  compactionCatchUpMaxChunks: 2,
+  model: "@smol",
+  showWorkerNotifications: true,
+  passive: false,
+  debugLog: false
+};
+var WORKER_THINKING_LEVEL = "low";
+var COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 6e4;
+var COMPACTION_RETAINED_CONTEXT_RATIO = 0.5;
+function resolveCompactionMaxRetainedTokens(config, contextWindow) {
+  if (config.compactionMaxRetainedTokens !== void 0 && config.compactionMaxRetainedTokens > 0) {
+    return config.compactionMaxRetainedTokens;
+  }
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(1, Math.floor(contextWindow * COMPACTION_RETAINED_CONTEXT_RATIO));
+  }
+  return COMPACTION_RETAINED_FALLBACK_MAX_TOKENS;
+}
+var COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS = 8e3;
+var COMPACTION_SUMMARY_CONTEXT_RATIO = 0.125;
+function resolveCompactionSummaryMaxTokens(config, contextWindow) {
+  if (config.compactionSummaryMaxTokens !== void 0 && config.compactionSummaryMaxTokens > 0) {
+    return config.compactionSummaryMaxTokens;
+  }
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(1, Math.floor(contextWindow * COMPACTION_SUMMARY_CONTEXT_RATIO));
+  }
+  return COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS;
+}
+var WORKER_MEMORY_FALLBACK_MAX_TOKENS = 16e3;
+var WORKER_MEMORY_CONTEXT_RATIO = 0.25;
+function resolveWorkerMemoryMaxTokens(config, contextWindow) {
+  if (config.workerMemoryMaxTokens !== void 0 && config.workerMemoryMaxTokens > 0) return config.workerMemoryMaxTokens;
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(1, Math.floor(contextWindow * WORKER_MEMORY_CONTEXT_RATIO));
+  }
+  return WORKER_MEMORY_FALLBACK_MAX_TOKENS;
+}
+var OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 6e4;
+var OBSERVER_CHUNK_MIN_TOKENS = 256;
+var OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
+function resolveObserverChunkMaxTokens(config, contextWindow) {
+  if (config.observerChunkMaxTokens !== void 0 && config.observerChunkMaxTokens > 0) {
+    return Math.max(OBSERVER_CHUNK_MIN_TOKENS, config.observerChunkMaxTokens);
+  }
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(
+      OBSERVER_CHUNK_MIN_TOKENS,
+      Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO)
+    );
+  }
+  return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
+}
+var CONFIG_FILE = "omp-om.json";
+var PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
+var REMOVED_KEYS = [
+  "compactAfterTokens",
+  "compactAfterTokensMode",
+  "compactAfterTokensRatio",
+  "consolidateWhenIdle",
+  "fallbackModel"
+];
+function positiveIntegerOrUndefined(value) {
+  return Number.isInteger(value) && typeof value === "number" && value > 0 ? value : void 0;
+}
+function validTargetOrUndefined(value, maxTokens) {
+  const target = positiveIntegerOrUndefined(value);
+  return target !== void 0 && target < maxTokens ? target : void 0;
+}
+function derivedObservationPoolTarget(maxTokens) {
+  return Math.floor(maxTokens / 2);
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null;
+}
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+function normalizeSettingsConfig(path, value, warnings) {
+  const normalized = {};
+  const numberKeys = [
+    "observeAfterTokens",
+    "reflectAfterTokens",
+    "observerChunkMaxTokens",
+    "compactionMaxRetainedTokens",
+    "compactionSummaryMaxTokens",
+    "workerMemoryMaxTokens",
+    "observationsPoolMaxTokens",
+    "observationsPoolTargetTokens",
+    "agentMaxTurns",
+    "agentMaxTokens"
+  ];
+  for (const key of numberKeys) {
+    const normalizedValue = positiveIntegerOrUndefined(value[key]);
+    if (normalizedValue !== void 0) normalized[key] = normalizedValue;
+  }
+  if (Number.isInteger(value.compactionCatchUpMaxChunks) && value.compactionCatchUpMaxChunks >= 0) {
+    normalized.compactionCatchUpMaxChunks = value.compactionCatchUpMaxChunks;
+  }
+  if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
+  if (typeof value.passive === "boolean") normalized.passive = value.passive;
+  if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
+  if (value.model !== void 0) {
+    const model = nonEmptyString(value.model);
+    if (model) normalized.model = model;
+    else warnings.push(`${path}: "model" must be a non-empty string such as "@smol" or "provider/id"; ignored`);
+  }
+  for (const key of REMOVED_KEYS) {
+    if (key in value) warnings.push(`${path}: "${key}" is no longer supported; ignored`);
+  }
+  return normalized;
+}
+function readEnvConfig(env = process.env) {
+  const rawPassive = env[PASSIVE_ENV];
+  if (rawPassive === void 0) return {};
+  const passive = rawPassive.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(passive)) return { passive: true };
+  if (["0", "false", "no", "off"].includes(passive)) return { passive: false };
+  return {};
+}
+function readConfigFile(path, warnings) {
+  if (!existsSync(path)) return {};
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (error) {
+    warnings.push(`${path}: ${error instanceof Error ? error.message : String(error)}; using defaults for this file`);
+    return {};
+  }
+  if (!isRecord(raw) || Array.isArray(raw)) {
+    warnings.push(`${path}: expected a JSON object; using defaults for this file`);
+    return {};
+  }
+  return normalizeSettingsConfig(path, raw, warnings);
+}
+function loadConfig(cwd, agentDir, env = process.env) {
+  const warnings = [];
+  const globalConfig = readConfigFile(join(agentDir, CONFIG_FILE), warnings);
+  const projectConfig = readConfigFile(join(cwd, ".omp", CONFIG_FILE), warnings);
+  const envConfig = readEnvConfig(env);
+  const merged = {
+    ...DEFAULTS,
+    observationsPoolTargetTokens: void 0,
+    ...globalConfig,
+    ...projectConfig,
+    ...envConfig
+  };
+  const target = validTargetOrUndefined(
+    merged.observationsPoolTargetTokens,
+    merged.observationsPoolMaxTokens
+  ) ?? derivedObservationPoolTarget(merged.observationsPoolMaxTokens);
+  return { config: { ...merged, observationsPoolTargetTokens: target }, warnings };
+}
+
 // src/debug-log.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync as existsSync2, mkdirSync, renameSync, statSync, unlinkSync, appendFileSync } from "node:fs";
 import { dirname, join as join2 } from "node:path";
-import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 var DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024;
 var DEBUG_LOG_RELATIVE_PATH = join2("observational-memory", "debug.ndjson");
 var DEBUG_LOG_SESSION_DIR_RELATIVE_PATH = join2("observational-memory", "debug");
@@ -1272,7 +1159,7 @@ function debugLog(event, data = {}) {
   const context = storage.getStore();
   if (context?.enabled !== true) return;
   try {
-    const path = join2(getAgentDir2(), debugLogRelativePath(context));
+    const path = join2(getAgentDir(), debugLogRelativePath(context));
     mkdirSync(dirname(path), { recursive: true });
     rotateIfNeeded(path);
     const payload = {
@@ -1297,8 +1184,13 @@ function rotateIfNeeded(path) {
   renameSync(path, backupPath);
 }
 
+// src/agents/agent-loop.ts
+import {
+  agentLoop as hostAgentLoop
+} from "@earendil-works/pi-agent-core";
+var agentLoop = hostAgentLoop;
+
 // src/agents/observer/agent.ts
-import { agentLoop } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 
 // src/ids.ts
@@ -1317,25 +1209,6 @@ function logAgentStreamError(stage, event) {
     stopReason: message.stopReason,
     errorMessage: message.errorMessage
   });
-}
-
-// src/agents/worker-stream.ts
-import { streamSimple as compatStreamSimple } from "@earendil-works/pi-ai/compat";
-function resolveWorkerStreamSimple(model, modelRegistry, override) {
-  if (override) return override;
-  const registryStream = modelRegistry?.streamSimple;
-  if (typeof registryStream === "function") {
-    return (nextModel, context, options) => registryStream.call(modelRegistry, nextModel, context, options);
-  }
-  try {
-    const config = modelRegistry?.getRegisteredProviderConfig?.(model.provider);
-    const composed = config?.streamSimple;
-    if (config?.api === model.api && typeof composed === "function") {
-      return composed;
-    }
-  } catch {
-  }
-  return compatStreamSimple;
 }
 
 // src/model-budget.ts
@@ -1694,8 +1567,8 @@ var RecordObservationsSchema = Type.Object({
 });
 var ObserverStreamError = class extends Error {
   stopReason;
-  constructor(stopReason, errorMessage) {
-    super(`observer stream ended with stopReason "${stopReason}"${errorMessage ? `: ${errorMessage}` : ""}`);
+  constructor(stopReason, errorMessage2) {
+    super(`observer stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
     this.name = "ObserverStreamError";
     this.stopReason = stopReason;
   }
@@ -1807,13 +1680,7 @@ ${conversation}`;
     } : {}
   };
   const loop = args.agentLoop ?? agentLoop;
-  const stream = loop(
-    prompts,
-    context,
-    config,
-    signal,
-    resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
-  );
+  const stream = loop(prompts, context, config, signal);
   let streamError;
   for await (const event of stream) {
     logAgentStreamError("observer", event);
@@ -1836,7 +1703,7 @@ async function catchUpObserver(args) {
   const result = { chunksRecorded: 0 };
   if (maxChunks <= 0) return result;
   const resolved = await runtime.resolveModel({
-    model: ctx.model,
+    models: ctx.models,
     modelRegistry: ctx.modelRegistry,
     hasUI: ctx.hasUI,
     ui: ctx.ui
@@ -1878,14 +1745,13 @@ async function catchUpObserver(args) {
         signal,
         maxTurns: runtime.config.agentMaxTurns,
         maxOutputTokens: runtime.config.agentMaxTokens,
-        thinkingLevel: runtime.config.model?.thinking ?? "low",
-        modelRegistry: ctx.modelRegistry
+        thinkingLevel: WORKER_THINKING_LEVEL
       });
     } catch (error) {
       if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      debugLog("compaction.catch_up.error", { chunkIndex, errorMessage });
-      if (ctx.hasUI) ctx.ui.notify(`Observational memory: catch-up observer failed: ${errorMessage}`, "warning");
+      const errorMessage2 = error instanceof Error ? error.message : String(error);
+      debugLog("compaction.catch_up.error", { chunkIndex, errorMessage: errorMessage2 });
+      if (ctx.hasUI) ctx.ui.notify(`Observational memory: catch-up observer failed: ${errorMessage2}`, "warning");
       return { ...result, stoppedBecause: "error" };
     }
     const data = observations && observations.length > 0 ? buildObservationsRecordedData(observations, coversUpToId) : void 0;
@@ -2101,7 +1967,6 @@ function registerCompactionHook(pi, runtime) {
 }
 
 // src/agents/dropper/agent.ts
-import { agentLoop as agentLoop2 } from "@earendil-works/pi-agent-core";
 import { Type as Type2 } from "@earendil-works/pi-ai";
 
 // src/agents/dropper/prompts.ts
@@ -2245,8 +2110,8 @@ function coverageTierForObservation(observation, coverageById) {
 // src/agents/dropper/agent.ts
 var DropperStreamError = class extends Error {
   stopReason;
-  constructor(stopReason, errorMessage) {
-    super(`dropper stream ended with stopReason "${stopReason}"${errorMessage ? `: ${errorMessage}` : ""}`);
+  constructor(stopReason, errorMessage2) {
+    super(`dropper stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
     this.name = "DropperStreamError";
     this.stopReason = stopReason;
   }
@@ -2424,14 +2289,8 @@ This maximum is a hard upper bound, not a target. Drop fewer or none if fewer ob
       }
     } : {}
   };
-  const loop = args.agentLoop ?? agentLoop2;
-  const stream = loop(
-    prompts,
-    context,
-    config,
-    signal,
-    resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
-  );
+  const loop = args.agentLoop ?? agentLoop;
+  const stream = loop(prompts, context, config, signal);
   let streamError;
   for await (const event of stream) {
     logAgentStreamError("dropper", event);
@@ -2463,7 +2322,6 @@ This maximum is a hard upper bound, not a target. Drop fewer or none if fewer ob
 }
 
 // src/agents/reflector/agent.ts
-import { agentLoop as agentLoop3 } from "@earendil-works/pi-agent-core";
 import { Type as Type3 } from "@earendil-works/pi-ai";
 
 // src/agents/reflector/prompts.ts
@@ -2552,8 +2410,8 @@ Examples:
 // src/agents/reflector/agent.ts
 var ReflectorStreamError = class extends Error {
   stopReason;
-  constructor(stopReason, errorMessage) {
-    super(`reflector stream ended with stopReason "${stopReason}"${errorMessage ? `: ${errorMessage}` : ""}`);
+  constructor(stopReason, errorMessage2) {
+    super(`reflector stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
     this.name = "ReflectorStreamError";
     this.stopReason = stopReason;
   }
@@ -2698,14 +2556,8 @@ Crystallize any missing durable facts or patterns into new reflections. If nothi
       }
     } : {}
   };
-  const loop = args.agentLoop ?? agentLoop3;
-  const stream = loop(
-    prompts,
-    context,
-    config,
-    signal,
-    resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
-  );
+  const loop = args.agentLoop ?? agentLoop;
+  const stream = loop(prompts, context, config, signal);
   let streamError;
   for await (const event of stream) {
     logAgentStreamError("reflector", event);
@@ -2788,34 +2640,18 @@ function workerHeadersFor(ctx, resolved) {
     }
   };
 }
-function workerThinkingLevel(runtime, resolved) {
-  if (resolved.fallbackUsed === true) {
-    return runtime.config.fallbackModel?.thinking ?? runtime.config.model?.thinking ?? "low";
+function modelContextWindow(resolved) {
+  const model = resolved.model;
+  if (model && typeof model === "object" && "contextWindow" in model && typeof model.contextWindow === "number") {
+    return model.contextWindow;
   }
-  return runtime.config.model?.thinking ?? "low";
-}
-function observerChunkContextWindow(runtime, ctx, resolved) {
-  const primary = resolved.model?.contextWindow;
-  const fallback = runtime.config.fallbackModel;
-  if (!fallback) return primary;
-  const fallbackModel = ctx.modelRegistry.find?.(fallback.provider, fallback.id);
-  const usablePrimary = typeof primary === "number" && primary > 0 ? primary : void 0;
-  const fallbackWindow = fallbackModel?.contextWindow;
-  const usableFallback = typeof fallbackWindow === "number" && fallbackWindow > 0 ? fallbackWindow : void 0;
-  if (usablePrimary === void 0) return usableFallback;
-  if (usableFallback === void 0) return usablePrimary;
-  return Math.min(usablePrimary, usableFallback);
+  return void 0;
 }
 function makeModelResolver(runtime, ctx) {
   let cached;
-  let fallbackActive;
   const resolve = async (stage) => {
-    if (fallbackActive) {
-      runtime.resolveFailureNotified = false;
-      return fallbackActive;
-    }
     cached ??= await runtime.resolveModel({
-      model: ctx.model,
+      models: ctx.models,
       modelRegistry: ctx.modelRegistry,
       hasUI: ctx.hasUI,
       ui: ctx.ui
@@ -2831,88 +2667,14 @@ function makeModelResolver(runtime, ctx) {
     }
     return void 0;
   };
-  const resolveFallback = async (stage) => {
-    if (fallbackActive) return fallbackActive;
-    const resolveFallbackModel = runtime.resolveFallbackModel;
-    if (typeof resolveFallbackModel !== "function") {
-      debugLog(`${stage}.fallback_unavailable`, { reason: "runtime exposes no resolveFallbackModel" });
-      return void 0;
-    }
-    const resolvedCtx = {
-      model: ctx.model,
-      modelRegistry: ctx.modelRegistry,
-      hasUI: ctx.hasUI,
-      ui: ctx.ui
-    };
-    const result = await resolveFallbackModel.call(runtime, resolvedCtx);
-    if (!result.ok) {
-      debugLog(`${stage}.fallback_unavailable`, { reason: result.reason });
-      return void 0;
-    }
-    const resolved = workerHeadersFor(ctx, { ...result, fallbackUsed: true });
-    fallbackActive = resolved;
-    debugLog(`${stage}.fallback_active`, {
-      provider: resolved.model?.provider,
-      id: resolved.model?.id
-    });
-    return resolved;
-  };
-  return { resolve, resolveFallback };
+  return { resolve };
 }
-async function runStageWithFallback(ctx, stage, resolved, resolver, work, signal) {
-  try {
-    return await work(resolved);
-  } catch (primaryError) {
-    if (signal?.aborted) throw primaryError;
-    if (resolved.fallbackUsed === true) throw primaryError;
-    const fallback = await resolver.resolveFallback(stage);
-    if (!fallback) throw primaryError;
-    const message = primaryError instanceof Error ? primaryError.message : String(primaryError);
-    debugLog(`${stage}.fallback_retry`, {
-      primaryError: message,
-      provider: fallback.model?.provider,
-      id: fallback.model?.id
-    });
-    if (ctx.hasUI && ctx.ui) {
-      ctx.ui.notify(
-        `Observational memory: ${stage} failed (${message}); retrying with fallback model`,
-        "warning"
-      );
-    }
-    return await work(fallback);
-  }
-}
-function registerConsolidationTrigger(pi, runtime, hooks = {}) {
-  const idleMode = (ctx) => {
-    runtime.ensureConfig(ctx.cwd);
-    return runtime.config.consolidateWhenIdle === true;
-  };
+function registerConsolidationTrigger(pi, runtime) {
   pi.on("agent_start", (_event, ctx) => {
-    if (!idleMode(ctx)) {
-      maybeLaunchConsolidation(pi, runtime, ctx);
-      return;
-    }
-    if (runtime.abortConsolidation?.()) {
-      debugLog("consolidation.aborted", { reason: "agent_start" });
-      if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
-        "Observational memory: memory workers paused while the agent runs (consolidateWhenIdle)",
-        "info"
-      );
-    }
-  });
-  pi.on("turn_end", (_event, ctx) => {
-    if (idleMode(ctx)) return;
     maybeLaunchConsolidation(pi, runtime, ctx);
   });
-  pi.on("agent_settled", (_event, ctx) => {
-    if (!idleMode(ctx)) return;
-    const launched = maybeLaunchConsolidation(pi, runtime, ctx);
-    if (!hooks.afterIdleConsolidation) return;
-    if (!launched) {
-      hooks.afterIdleConsolidation(ctx);
-      return;
-    }
-    void launched.finally(() => hooks.afterIdleConsolidation?.(ctx));
+  pi.on("turn_end", (_event, ctx) => {
+    maybeLaunchConsolidation(pi, runtime, ctx);
   });
 }
 function debugSessionMetadata(ctx) {
@@ -2936,7 +2698,7 @@ function maybeLaunchConsolidation(pi, runtime, ctx) {
     cwd: ctx.cwd,
     hasUI: ctx.hasUI,
     ui: ctx.ui,
-    model: ctx.model,
+    models: ctx.models,
     modelRegistry: ctx.modelRegistry,
     getContextUsage: ctx.getContextUsage,
     sessionManager: ctx.sessionManager
@@ -3012,7 +2774,7 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
   }
   const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
   const backlogEntries = sourceEntriesAfter(entries, lastCoverageIdx);
-  const contextWindow = observerChunkContextWindow(runtime, ctx, resolved);
+  const contextWindow = modelContextWindow(resolved);
   const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
   const {
     text: chunk,
@@ -3054,11 +2816,11 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
   });
   let observations;
   try {
-    observations = await runStageWithFallback(ctx, "observer", resolved, resolver, (worker) => runObserver({
-      model: worker.model,
-      apiKey: worker.apiKey,
-      headers: worker.headers,
-      env: worker.env,
+    observations = await runObserver({
+      model: resolved.model,
+      apiKey: resolved.apiKey,
+      headers: resolved.headers,
+      env: resolved.env,
       priorReflections,
       priorObservations,
       chunk,
@@ -3066,9 +2828,8 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
       maxTurns: runtime.config.agentMaxTurns,
       maxOutputTokens: runtime.config.agentMaxTokens,
       signal: consolidationSignal(runtime),
-      thinkingLevel: workerThinkingLevel(runtime, worker),
-      modelRegistry: ctx.modelRegistry
-    }), consolidationSignal(runtime));
+      thinkingLevel: WORKER_THINKING_LEVEL
+    });
   } catch (error) {
     if (wasAborted(runtime)) {
       debugLog("observer.aborted", { coversUpToId });
@@ -3126,26 +2887,23 @@ async function runReflectorStage(pi, runtime, ctx, resolver) {
     return { outcome: "abort", sameRunReflections: [] };
   }
   const folded = foldLedger(entries);
-  const reflections = await runStageWithFallback(ctx, "reflector", resolved, resolver, (worker) => {
-    const reflectorMemory = boundWorkerMemory(
-      folded.reflections,
-      folded.activeObservations,
-      resolveWorkerMemoryMaxTokens(runtime.config, worker.model.contextWindow)
-    );
-    return runReflector({
-      model: worker.model,
-      apiKey: worker.apiKey,
-      headers: worker.headers,
-      env: worker.env,
-      reflections: reflectorMemory.reflections,
-      observations: reflectorMemory.observations,
-      maxTurns: runtime.config.agentMaxTurns,
-      maxOutputTokens: runtime.config.agentMaxTokens,
-      signal: consolidationSignal(runtime),
-      thinkingLevel: workerThinkingLevel(runtime, worker),
-      modelRegistry: ctx.modelRegistry
-    });
-  }, consolidationSignal(runtime));
+  const reflectorMemory = boundWorkerMemory(
+    folded.reflections,
+    folded.activeObservations,
+    resolveWorkerMemoryMaxTokens(runtime.config, modelContextWindow(resolved))
+  );
+  const reflections = await runReflector({
+    model: resolved.model,
+    apiKey: resolved.apiKey,
+    headers: resolved.headers,
+    env: resolved.env,
+    reflections: reflectorMemory.reflections,
+    observations: reflectorMemory.observations,
+    maxTurns: runtime.config.agentMaxTurns,
+    maxOutputTokens: runtime.config.agentMaxTokens,
+    signal: consolidationSignal(runtime),
+    thinkingLevel: WORKER_THINKING_LEVEL
+  });
   if (wasAborted(runtime)) {
     debugLog("reflector.aborted", {});
     return { outcome: "abort", sameRunReflections: [] };
@@ -3204,28 +2962,25 @@ async function runDropperStage(pi, runtime, ctx, resolver, sameRunReflections, s
     return "abort";
   }
   const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
-  const droppedIds = await runStageWithFallback(ctx, "dropper", resolved, resolver, (worker) => {
-    const dropperMemory = boundWorkerMemory(
-      reflectionsForDropper,
-      folded.activeObservations,
-      resolveWorkerMemoryMaxTokens(runtime.config, worker.model.contextWindow),
-      { observationsFrom: "oldest" }
-    );
-    return runDropper({
-      model: worker.model,
-      apiKey: worker.apiKey,
-      headers: worker.headers,
-      env: worker.env,
-      reflections: dropperMemory.reflections,
-      observations: dropperMemory.observations,
-      targetTokens: runtime.config.observationsPoolTargetTokens,
-      maxTurns: runtime.config.agentMaxTurns,
-      maxOutputTokens: runtime.config.agentMaxTokens,
-      signal: consolidationSignal(runtime),
-      thinkingLevel: workerThinkingLevel(runtime, worker),
-      modelRegistry: ctx.modelRegistry
-    });
-  }, consolidationSignal(runtime));
+  const dropperMemory = boundWorkerMemory(
+    reflectionsForDropper,
+    folded.activeObservations,
+    resolveWorkerMemoryMaxTokens(runtime.config, modelContextWindow(resolved)),
+    { observationsFrom: "oldest" }
+  );
+  const droppedIds = await runDropper({
+    model: resolved.model,
+    apiKey: resolved.apiKey,
+    headers: resolved.headers,
+    env: resolved.env,
+    reflections: dropperMemory.reflections,
+    observations: dropperMemory.observations,
+    targetTokens: runtime.config.observationsPoolTargetTokens,
+    maxTurns: runtime.config.agentMaxTurns,
+    maxOutputTokens: runtime.config.agentMaxTokens,
+    signal: consolidationSignal(runtime),
+    thinkingLevel: WORKER_THINKING_LEVEL
+  });
   if (wasAborted(runtime)) {
     debugLog("dropper.aborted", {});
     return "abort";
@@ -3243,6 +2998,7 @@ async function runDropperStage(pi, runtime, ctx, resolver, sameRunReflections, s
 }
 
 // src/runtime.ts
+import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
 function hasUsableAuth(auth) {
   if (typeof auth.apiKey === "string" && auth.apiKey.length > 0) return true;
   return countUsableHeaders(auth.headers) > 0;
@@ -3265,15 +3021,19 @@ function hasConfiguredProviderCredential(registry, model) {
     return false;
   }
 }
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 var Runtime = class {
   config = { ...DEFAULTS };
+  /** Problems found while loading `omp-om.json` (malformed files, removed or invalid keys); shown by `/om:status`. */
+  configWarnings = [];
   configLoaded = false;
   consolidationInFlight = false;
   consolidationPromise = null;
   consolidationPhase;
-  /** Aborts the in-flight consolidation run's model calls (see `consolidateWhenIdle`). */
+  /** Aborts the in-flight consolidation run's model calls. */
   consolidationAbortController;
-  compactInFlight = false;
   compactHookInFlight = false;
   resolveFailureNotified = false;
   lastObserverError;
@@ -3285,71 +3045,34 @@ var Runtime = class {
   observerEmptyBackoff;
   ensureConfig(cwd) {
     if (this.configLoaded) return;
-    this.config = loadConfig(cwd);
+    const { config, warnings } = loadConfig(cwd, getAgentDir2());
+    this.config = config;
+    this.configWarnings = warnings;
     this.configLoaded = true;
   }
   /**
-   * Resolve the model memory workers should use.
-   *
-   * Order: `config.model` (falling back to the session model when it is absent
-   * from Pi's registry), then `config.fallbackModel` when the primary resolution
-   * fails. With no fallback configured the primary reason is returned unchanged;
-   * with a configured-but-broken fallback both reasons are reported.
+   * Resolve the one memory model workers use: `config.model` through omp's
+   * `ctx.models.resolve`, then the auth acceptance rule in `resolveCandidate`.
+   * There is no session-model or secondary fallback; callers skip their work
+   * when this returns `ok: false`. Never throws.
    */
   async resolveModel(ctx) {
-    const primary = await this.resolvePrimaryModel(ctx);
-    if (primary.ok) return primary;
-    const fallback = await this.resolveFallbackModel(ctx);
-    if (!fallback.ok) {
-      return this.config.fallbackModel ? { ok: false, reason: `${primary.reason}; ${fallback.reason}` } : primary;
+    const spec = this.config.model;
+    let model;
+    try {
+      if (!ctx.models) return { ok: false, reason: "ctx.models is unavailable; omp-om requires omp's extension context" };
+      model = ctx.models.resolve(spec);
+    } catch (error) {
+      return { ok: false, reason: `memory model "${spec}" failed to resolve: ${errorMessage(error)}` };
     }
-    const target = this.config.fallbackModel;
-    const provider = fallback.model.provider ?? target?.provider ?? "unknown";
-    const id = fallback.model.id ?? target?.id ?? "unknown";
-    if (ctx.hasUI && ctx.ui) {
-      ctx.ui.notify(
-        `Observational memory: primary model unavailable (${primary.reason}); using fallback ${provider}/${id}`,
-        "warning"
-      );
+    if (!model) {
+      return { ok: false, reason: `memory model "${spec}" did not resolve to an available model; set "model" in omp-om.json` };
     }
-    debugLog("resolve.fallback_used", { provider, id, primaryFailure: primary.reason });
-    return { ...fallback, fallbackUsed: true, primaryFailure: primary.reason };
-  }
-  /** `config.model` when it resolves in Pi's registry, otherwise the session model. */
-  async resolvePrimaryModel(ctx) {
-    let model = ctx.model;
-    if (this.config.model) {
-      const configured = ctx.modelRegistry.find(this.config.model.provider, this.config.model.id);
-      if (configured) {
-        model = configured;
-      } else if (ctx.hasUI && ctx.ui) {
-        ctx.ui.notify(
-          `Observational memory: configured model ${this.config.model.provider}/${this.config.model.id} not found, using session model`,
-          "warning"
-        );
-      }
+    try {
+      return await this.resolveCandidate(ctx, model);
+    } catch (error) {
+      return { ok: false, reason: `auth lookup failed for memory model "${spec}": ${errorMessage(error)}` };
     }
-    if (!model) return { ok: false, reason: "no model available (session has no model and no observational-memory model configured)" };
-    return this.resolveCandidate(ctx, model);
-  }
-  /**
-   * Resolve `config.fallbackModel` with the same auth rules as the primary path.
-   * Exposed so the consolidation stages can retry a failed model call once.
-   * Returns `ok: false` when unset, identical to the configured primary, absent
-   * from the registry, or carrying no usable credentials.
-   */
-  async resolveFallbackModel(ctx) {
-    const target = this.config.fallbackModel;
-    if (!target) return { ok: false, reason: "no fallback model configured" };
-    const configured = this.config.model;
-    const configuredResolved = configured ? ctx.modelRegistry.find(configured.provider, configured.id) : void 0;
-    const effectivePrimary = configuredResolved ?? ctx.model;
-    if (effectivePrimary && effectivePrimary.provider === target.provider && effectivePrimary.id === target.id) {
-      return { ok: false, reason: `fallback model ${target.provider}/${target.id} is identical to the effective primary model` };
-    }
-    const model = ctx.modelRegistry.find(target.provider, target.id);
-    if (!model) return { ok: false, reason: `fallback model ${target.provider}/${target.id} not found` };
-    return this.resolveCandidate(ctx, model);
   }
   /** Apply Pi's request-auth acceptance rule to one already-selected model. */
   async resolveCandidate(ctx, model) {
@@ -3456,13 +3179,6 @@ var Runtime = class {
     this.consolidationPromise = promise;
     return promise;
   }
-  /** Abort the in-flight consolidation run, if any. Returns true when one was running. */
-  abortConsolidation() {
-    const controller = this.consolidationAbortController;
-    if (!controller || !this.consolidationInFlight) return false;
-    controller.abort();
-    return true;
-  }
   recordConsolidationStageError(ctx, phase, error) {
     const message = error instanceof Error ? error.message : String(error);
     if (phase === "observer") this.lastObserverError = message;
@@ -3475,14 +3191,14 @@ var Runtime = class {
     const hasUI = ctx.hasUI;
     const ui = ctx.ui;
     return (async () => {
-      let errorMessage;
+      let errorMessage2;
       try {
         await work();
       } catch (error) {
-        errorMessage = error instanceof Error ? error.message : String(error);
-        if (hasUI && ui) ui.notify(`Observational memory: ${label} failed: ${errorMessage}`, "warning");
+        errorMessage2 = error instanceof Error ? error.message : String(error);
+        if (hasUI && ui) ui.notify(`Observational memory: ${label} failed: ${errorMessage2}`, "warning");
       } finally {
-        onFinally(errorMessage);
+        onFinally(errorMessage2);
       }
     })();
   }
@@ -3492,7 +3208,7 @@ var Runtime = class {
 import { Type as Type4 } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-var RECALL_OBSERVATION_TOOL_NAME = "recall";
+var RECALL_OBSERVATION_TOOL_NAME = "om_recall";
 var MEMORY_ID_PATTERN2 = /^[a-f0-9]{12}$/;
 function pad2(n) {
   return n.toString().padStart(2, "0");
@@ -3790,7 +3506,7 @@ function formatRecallResultForTui(result, expanded) {
   const details = result.details;
   if (!details) {
     const text = result.content.filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
-    return text || "recall";
+    return text || "om_recall";
   }
   const sources = sourceEntriesFromDetails(details);
   const lines = [];
@@ -3805,7 +3521,7 @@ function formatRecallResultForTui(result, expanded) {
   return lines.join("\n").trimEnd();
 }
 function formatRecallCallForTui(id) {
-  return `recall ${id ?? "..."}`;
+  return `om_recall ${id ?? "..."}`;
 }
 function formatRecallRenderedResultForTui(result, expanded) {
   const body = formatRecallResultForTui(result, expanded);
@@ -3823,19 +3539,19 @@ var recallObservationTool = defineTool({
   name: RECALL_OBSERVATION_TOOL_NAME,
   label: "Recall memory evidence",
   description: "Recover exact evidence and source context behind a compacted observational-memory observation or reflection id on the current branch. Use when compressed memory is important and original source context is needed before acting.",
-  promptSnippet: "Use recall(<id>) to recover exact source context behind compacted memory observations/reflections when precision matters.",
+  promptSnippet: "Use om_recall(<id>) to recover exact source context behind compacted memory observations/reflections when precision matters.",
   promptGuidelines: [
-    "Use recall before making an important decision that depends on a compacted observation or reflection whose details are unclear.",
-    "Use recall when you need exact wording, rationale, file paths, commands, errors, commits, user constraints, or provenance behind a remembered claim.",
-    "Use recall when a broad reflection is relevant but you need its supporting observations or raw sources to continue safely.",
-    "Use recall when the user asks why you believe something, what supports a memory, or what was decided earlier.",
-    "Do not use recall as semantic search or transcript browsing; you must already have a specific 12-character memory id.",
+    "Use om_recall before making an important decision that depends on a compacted observation or reflection whose details are unclear.",
+    "Use om_recall when you need exact wording, rationale, file paths, commands, errors, commits, user constraints, or provenance behind a remembered claim.",
+    "Use om_recall when a broad reflection is relevant but you need its supporting observations or raw sources to continue safely.",
+    "Use om_recall when the user asks why you believe something, what supports a memory, or what was decided earlier.",
+    "Do not use om_recall as semantic search or transcript browsing; you must already have a specific 12-character memory id.",
     "Do not recall every id preemptively. Recall only when exact source context will materially improve the next action."
   ],
   parameters: Type4.Object({
     id: Type4.String({
       pattern: "^[a-f0-9]{12}$",
-      description: "12-character lowercase hex observation or reflection id shown in compacted memory, /om:view, or a previous recall result. Must be a specific id; this tool does not search by topic."
+      description: "12-character lowercase hex observation or reflection id shown in compacted memory, /om:view, or a previous om_recall result. Must be a specific id; this tool does not search by topic."
     })
   }),
   renderCall(args) {
@@ -3866,10 +3582,7 @@ function registerRecallTool(pi) {
 // src/index.ts
 function observationalMemory(pi) {
   const runtime = new Runtime();
-  registerConsolidationTrigger(pi, runtime, {
-    afterIdleConsolidation: (ctx) => maybeTriggerCompaction(runtime, ctx)
-  });
-  registerCompactionTrigger(pi, runtime);
+  registerConsolidationTrigger(pi, runtime);
   registerCompactionHook(pi, runtime);
   registerStatusCommand(pi, runtime);
   registerViewCommand(pi, runtime);

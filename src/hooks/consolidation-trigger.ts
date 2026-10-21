@@ -397,7 +397,6 @@ async function runObserverStage(
 			maxOutputTokens: runtime.config.agentMaxTokens,
 			signal: consolidationSignal(runtime),
 			thinkingLevel: WORKER_THINKING_LEVEL,
-			modelRegistry: ctx.modelRegistry,
 		});
 	} catch (error) {
 		if (wasAborted(runtime)) {
@@ -486,7 +485,6 @@ async function runReflectorStage(
 		maxOutputTokens: runtime.config.agentMaxTokens,
 		signal: consolidationSignal(runtime),
 		thinkingLevel: WORKER_THINKING_LEVEL,
-		modelRegistry: ctx.modelRegistry,
 	});
 	if (wasAborted(runtime)) {
 		debugLog("reflector.aborted", {});
@@ -578,7 +576,6 @@ async function runDropperStage(
 		maxOutputTokens: runtime.config.agentMaxTokens,
 		signal: consolidationSignal(runtime),
 		thinkingLevel: WORKER_THINKING_LEVEL,
-		modelRegistry: ctx.modelRegistry,
 	});
 	if (wasAborted(runtime)) {
 		debugLog("dropper.aborted", {});
