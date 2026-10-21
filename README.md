@@ -20,21 +20,38 @@ Ledger compaction avoids omp's summarization call, but the workers (and any obse
 
 ## Install
 
-Build it, then load it for one run:
+Requires omp and Node.js 22.19 or newer. The repository ships a prebuilt `dist/`, so no build step is needed.
+
+**Install from GitHub (recommended):**
 
 ```bash
-cd /path/to/omp-om
-npm install
-npm run build
+omp plugin install github:sovorn-c/omp-om
+```
+
+**Or from a local clone:**
+
+```bash
+git clone https://github.com/sovorn-c/omp-om.git
+omp plugin link ./omp-om
+```
+
+Check it with `omp plugin list`, then start omp as usual.
+
+**Try it for one run without installing:**
+
+```bash
 omp -e /path/to/omp-om
 ```
 
-Or load it on every run through the `extensions` setting in omp's `config.yml`:
+To remove it: `omp plugin uninstall omp-om`.
 
-```yaml
-extensions:
-  - /path/to/omp-om
-```
+## Quick start
+
+1. Install the plugin (above) and start omp. It works with no configuration: the memory model defaults to your `@smol` role model.
+2. Work normally. omp-om observes the session in the background once enough conversation has built up (about 10,000 tokens by default).
+3. Run `/om:status` to see memory counts and progress toward the next observation.
+4. Run `/om:view` to see what has been remembered. When omp compacts, this ledger becomes the summary.
+5. To use a different or cheaper memory model, or tune thresholds, create `~/.omp/agent/omp-om.json` (see [Configuration](#configuration)).
 
 omp-om never edits omp's settings. omp's compaction stays on and omp's own threshold decides when it fires. Keep `observeAfterTokens` < `reflectAfterTokens` < omp's compaction threshold so the ledger is ahead of the cut.
 
