@@ -295,7 +295,7 @@ describe("V3 reflector agent", () => {
 		}
 	});
 
-	it("keeps accepted reflections when a later stream turn fails", async () => {
+	it("rejects accepted reflections when a later provider request fails", async () => {
 		const content = "User prefers source-backed memory.";
 		const loop = ((prompts: any[], context: any) => ({
 			async *[Symbol.asyncIterator]() {
@@ -305,6 +305,6 @@ describe("V3 reflector agent", () => {
 			},
 			result: async () => ({}),
 		})) as any;
-		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toMatchObject([{ content }]);
+		await expect(runReflector({ ...baseArgs, agentLoop: loop })).rejects.toMatchObject({ name: "ReflectorStreamError", message: expect.stringContaining("rate limited") });
 	});
 });

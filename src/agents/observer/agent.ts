@@ -66,10 +66,9 @@ const RecordObservationsSchema = Type.Object({
 type RecordObservationsArgs = Static<typeof RecordObservationsSchema>;
 
 /**
- * Thrown when the agent loop ends with an API/stream failure (`stopReason`
- * `"error"`/`"aborted"`) without recording anything. agent-core returns such
- * runs normally, so without this the caller cannot tell a hard failure from a
- * deliberate empty result (#32).
+ * Thrown when any request in the agent loop ends with an API/stream failure
+ * (`stopReason` "error"/"aborted"). Partial tool output cannot establish
+ * whole-chunk coverage, so a failed run never returns records.
  */
 export class ObserverStreamError extends Error {
 	readonly stopReason: string;
@@ -222,9 +221,7 @@ ${conversation}`;
 		cap.dispose();
 	}
 
-	if (accumulated.size === 0) {
-		if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
-		return undefined;
-	}
+	if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
+	if (accumulated.size === 0) return undefined;
 	return Array.from(accumulated.values());
 }

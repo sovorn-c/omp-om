@@ -444,6 +444,7 @@ async function runReflectorStage(
 		folded.activeObservations,
 		resolveWorkerMemoryMaxTokens(runtime.config, modelContextWindow(resolved)),
 	);
+	if (reflectorMemory.observations.length === 0) return { outcome: "continue", sameRunReflections: [] };
 	const reflections = await runReflector({
 		model: resolved.model as any,
 		apiKey: resolved.apiKey,
@@ -526,6 +527,7 @@ async function runDropperStage(
 		resolveWorkerMemoryMaxTokens(runtime.config, modelContextWindow(resolved)),
 		{ observationsFrom: "oldest" },
 	);
+	if (!observationPoolMetrics(dropperMemory.observations, runtime.config.observationsPoolTargetTokens).ready) return "continue";
 	const droppedIds = await runDropper({
 		model: resolved.model as any,
 		apiKey: resolved.apiKey,

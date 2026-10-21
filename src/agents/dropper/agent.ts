@@ -281,8 +281,8 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 	} finally {
 		cap.dispose();
 	}
+	if (streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
 	const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
-	if (droppedIds.length === 0 && streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
 	const reason = droppedIds.length > 0
 		? "selected_nonempty"
 		: toolCallCount === 0

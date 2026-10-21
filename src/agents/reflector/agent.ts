@@ -214,8 +214,8 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 	} finally {
 		cap.dispose();
 	}
+	if (streamError) throw new ReflectorStreamError(streamError.stopReason, streamError.errorMessage);
 	const acceptedReflections = Array.from(accumulated.values());
-	if (acceptedReflections.length === 0 && streamError) throw new ReflectorStreamError(streamError.stopReason, streamError.errorMessage);
 	const afterCoverageById = reflectionCoverageMap(observations, [...reflections, ...acceptedReflections]);
 	debugLog("reflector.result", {
 		reason: acceptedReflections.length > 0 ? "accepted_nonempty" : toolCallCount === 0 ? "no_tool_call" : "all_filtered",

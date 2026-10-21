@@ -297,7 +297,7 @@ describe("V3 dropper agent", () => {
 		}
 	});
 
-	it("keeps safely selected drops when a later stream turn fails", async () => {
+	it("rejects proposed drops when a later provider request fails", async () => {
 		const loop = ((prompts: any[], context: any) => ({
 			async *[Symbol.asyncIterator]() {
 				yield { type: "message_end", message: { role: "assistant", stopReason: "toolUse" } };
@@ -306,7 +306,7 @@ describe("V3 dropper agent", () => {
 			},
 			result: async () => ({}),
 		})) as any;
-		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toEqual(["aaaaaaaaaaaa"]);
+		await expect(runDropper({ ...baseArgs, agentLoop: loop })).rejects.toMatchObject({ name: "DropperStreamError", message: expect.stringContaining("rate limited") });
 	});
 
 	it("skips the model at or below the target", async () => {

@@ -176,17 +176,14 @@ describe("runObserver", () => {
 		}
 	});
 
-	it("keeps partial observations when the stream errors after recording", async () => {
+	it("rejects partial observations when a later provider request fails", async () => {
 		const loop = fakeAgentLoop(async (_prompts, context) => {
 			await context.tools[0].execute("tool-1", {
 				observations: [{ timestamp: "2026-05-02 10:30", content: "Kept despite later error", relevance: "high", sourceEntryIds: ["entry-a"] }],
 			});
 		}, [assistantEndEvent("error", "gateway timeout")]);
 
-		const observations = await runObserver({ ...baseArgs, agentLoop: loop });
-
-		expect(observations).toHaveLength(1);
-		expect(observations?.[0].content).toBe("Kept despite later error");
+		await expect(runObserver({ ...baseArgs, agentLoop: loop })).rejects.toBeInstanceOf(ObserverStreamError);
 	});
 
 	it("stops the loop at maxTurns by aborting its signal, without an error", async () => {

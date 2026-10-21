@@ -1847,10 +1847,8 @@ ${conversation}`;
   } finally {
     cap.dispose();
   }
-  if (accumulated.size === 0) {
-    if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
-    return void 0;
-  }
+  if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
+  if (accumulated.size === 0) return void 0;
   return Array.from(accumulated.values());
 }
 
@@ -2491,8 +2489,8 @@ This maximum is a hard upper bound, not a target. Drop fewer or none if fewer ob
   } finally {
     cap.dispose();
   }
+  if (streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
   const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
-  if (droppedIds.length === 0 && streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
   const reason = droppedIds.length > 0 ? "selected_nonempty" : toolCallCount === 0 ? "no_tool_call" : proposedDropIds.length === 0 ? "all_filtered" : "selected_empty";
   const selectedDropTokens = droppedIds.reduce((sum, id) => sum + (allowed.get(id)?.tokenCount ?? 0), 0);
   debugLog("dropper.result", {
@@ -2756,8 +2754,8 @@ Crystallize any missing durable facts or patterns into new reflections. If nothi
   } finally {
     cap.dispose();
   }
+  if (streamError) throw new ReflectorStreamError(streamError.stopReason, streamError.errorMessage);
   const acceptedReflections = Array.from(accumulated.values());
-  if (acceptedReflections.length === 0 && streamError) throw new ReflectorStreamError(streamError.stopReason, streamError.errorMessage);
   const afterCoverageById = reflectionCoverageMap(observations, [...reflections, ...acceptedReflections]);
   debugLog("reflector.result", {
     reason: acceptedReflections.length > 0 ? "accepted_nonempty" : toolCallCount === 0 ? "no_tool_call" : "all_filtered",
@@ -3051,6 +3049,7 @@ async function runReflectorStage(pi, runtime, ctx, resolver) {
     folded.activeObservations,
     resolveWorkerMemoryMaxTokens(runtime.config, modelContextWindow(resolved))
   );
+  if (reflectorMemory.observations.length === 0) return { outcome: "continue", sameRunReflections: [] };
   const reflections = await runReflector({
     model: resolved.model,
     apiKey: resolved.apiKey,
@@ -3119,6 +3118,7 @@ async function runDropperStage(pi, runtime, ctx, resolver, sameRunReflections, s
     resolveWorkerMemoryMaxTokens(runtime.config, modelContextWindow(resolved)),
     { observationsFrom: "oldest" }
   );
+  if (!observationPoolMetrics(dropperMemory.observations, runtime.config.observationsPoolTargetTokens).ready) return "continue";
   const droppedIds = await runDropper({
     model: resolved.model,
     apiKey: resolved.apiKey,

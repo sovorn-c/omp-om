@@ -63,6 +63,8 @@ Memory failures stop the current worker pass, including its later stages. Routin
 
 Warnings appear only when the session has a UI (`ctx.hasUI`). In the smoke runs the session was driven over `--mode rpc` with UI enabled and the warnings arrived as `notify` events. In sessions without a UI they are not shown; turn on `debugLog` to see the underlying events.
 
+A provider failure rejects the entire worker result, including partial tool output; a failed observation chunk never advances coverage. Starting a pass, resolving credentials, or skipping a stage because no input fits its budget does not clear an outage. A completed worker request must succeed before ledger compaction resumes.
+
 | Message | Cause and fix |
 | --- | --- |
 | `observer failed: memory model "…" did not resolve …` | Fix `model` or credentials. This memory pass stops; omp uses normal compaction until a worker request succeeds. Repeated identical background failures are deduplicated while the same outage remains active. |
