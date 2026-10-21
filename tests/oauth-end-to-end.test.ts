@@ -159,7 +159,7 @@ describe("OAuth provider end-to-end consolidation", () => {
 			cwd: process.cwd(),
 			hasUI: true,
 			ui: { notify: (message: string) => notices.push(message) },
-			model,
+			models: { resolve: () => model },
 			modelRegistry: await oauthModelRegistry(),
 			sessionManager: { getBranch: () => entries },
 		});
@@ -212,7 +212,7 @@ describe("OAuth provider end-to-end consolidation", () => {
 			cwd: process.cwd(),
 			hasUI: true,
 			ui: { notify: (message: string) => notices.push(message) },
-			model,
+			models: { resolve: () => model },
 			modelRegistry: expiredOAuthModelRegistry(),
 			sessionManager: { getBranch: () => entries },
 		});

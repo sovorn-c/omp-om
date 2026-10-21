@@ -1,3 +1,4 @@
+import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Config, DEFAULTS, loadConfig } from "./config.js";
 import { debugLog } from "./debug-log.js";
 
@@ -9,10 +10,6 @@ export type ResolveResult =
 			headers?: Record<string, string>;
 			env?: Record<string, string>;
 			baseUrl?: string;
-			/** True when this result came from `config.fallbackModel` after the primary failed. */
-			fallbackUsed?: boolean;
-			/** Primary failure reason recorded when `fallbackUsed` is true. */
-			primaryFailure?: string;
 	  }
 	| { ok: false; reason: string };
 
@@ -95,8 +92,16 @@ function hasConfiguredProviderCredential(registry: unknown, model: unknown): boo
 	}
 }
 
+/** omp's `ctx.models` query facade; `resolve(spec)` returns the Model, or `undefined` when nothing matches. */
+export interface ModelQuery {
+	resolve(spec: string): unknown;
+}
+
+/** Pi's extension context plus omp's `ctx.models`, which Pi's types do not declare. */
+export type OmpExtensionContext = ExtensionContext & { models?: ModelQuery };
+
 export interface ResolveCtx {
-	model: unknown;
+	models?: ModelQuery;
 	modelRegistry: any;
 	hasUI: boolean;
 	ui?: { notify: Notify };
@@ -107,15 +112,20 @@ export interface LaunchCtx {
 	ui?: { notify: Notify };
 }
 
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 export class Runtime {
 	config: Config = { ...DEFAULTS };
+	/** Problems found while loading `omp-om.json` (malformed files, removed or invalid keys); shown by `/om:status`. */
+	configWarnings: string[] = [];
 	configLoaded = false;
 	consolidationInFlight = false;
 	consolidationPromise: Promise<void> | null = null;
 	consolidationPhase: ConsolidationPhase | undefined;
-	/** Aborts the in-flight consolidation run's model calls (see `consolidateWhenIdle`). */
+	/** Aborts the in-flight consolidation run's model calls. */
 	consolidationAbortController: AbortController | undefined;
-	compactInFlight = false;
 	compactHookInFlight = false;
 	resolveFailureNotified = false;
 	lastObserverError: string | undefined;
@@ -132,82 +142,35 @@ export class Runtime {
 
 	ensureConfig(cwd: string): void {
 		if (this.configLoaded) return;
-		this.config = loadConfig(cwd);
+		const { config, warnings } = loadConfig(cwd, getAgentDir());
+		this.config = config;
+		this.configWarnings = warnings;
 		this.configLoaded = true;
 	}
 
 	/**
-	 * Resolve the model memory workers should use.
-	 *
-	 * Order: `config.model` (falling back to the session model when it is absent
-	 * from Pi's registry), then `config.fallbackModel` when the primary resolution
-	 * fails. With no fallback configured the primary reason is returned unchanged;
-	 * with a configured-but-broken fallback both reasons are reported.
+	 * Resolve the one memory model workers use: `config.model` through omp's
+	 * `ctx.models.resolve`, then the auth acceptance rule in `resolveCandidate`.
+	 * There is no session-model or secondary fallback; callers skip their work
+	 * when this returns `ok: false`. Never throws.
 	 */
 	async resolveModel(ctx: ResolveCtx): Promise<ResolveResult> {
-		const primary = await this.resolvePrimaryModel(ctx);
-		if (primary.ok) return primary;
-		const fallback = await this.resolveFallbackModel(ctx);
-		if (!fallback.ok) {
-			return this.config.fallbackModel
-				? { ok: false, reason: `${primary.reason}; ${fallback.reason}` }
-				: primary;
+		const spec = this.config.model;
+		let model: unknown;
+		try {
+			if (!ctx.models) return { ok: false, reason: "ctx.models is unavailable; omp-om requires omp's extension context" };
+			model = ctx.models.resolve(spec);
+		} catch (error) {
+			return { ok: false, reason: `memory model "${spec}" failed to resolve: ${errorMessage(error)}` };
 		}
-		const target = this.config.fallbackModel;
-		const provider = (fallback.model as { provider?: string }).provider ?? target?.provider ?? "unknown";
-		const id = (fallback.model as { id?: string }).id ?? target?.id ?? "unknown";
-		if (ctx.hasUI && ctx.ui) {
-			ctx.ui.notify(
-				`Observational memory: primary model unavailable (${primary.reason}); using fallback ${provider}/${id}`,
-				"warning",
-			);
+		if (!model) {
+			return { ok: false, reason: `memory model "${spec}" did not resolve to an available model; set "model" in omp-om.json` };
 		}
-		debugLog("resolve.fallback_used", { provider, id, primaryFailure: primary.reason });
-		return { ...fallback, fallbackUsed: true, primaryFailure: primary.reason };
-	}
-
-	/** `config.model` when it resolves in Pi's registry, otherwise the session model. */
-	private async resolvePrimaryModel(ctx: ResolveCtx): Promise<ResolveResult> {
-		let model = ctx.model;
-		if (this.config.model) {
-			const configured = ctx.modelRegistry.find(this.config.model.provider, this.config.model.id);
-			if (configured) {
-				model = configured;
-			} else if (ctx.hasUI && ctx.ui) {
-				ctx.ui.notify(
-					`Observational memory: configured model ${this.config.model.provider}/${this.config.model.id} not found, using session model`,
-					"warning",
-				);
-			}
+		try {
+			return await this.resolveCandidate(ctx, model);
+		} catch (error) {
+			return { ok: false, reason: `auth lookup failed for memory model "${spec}": ${errorMessage(error)}` };
 		}
-		if (!model) return { ok: false, reason: "no model available (session has no model and no observational-memory model configured)" };
-		return this.resolveCandidate(ctx, model);
-	}
-
-	/**
-	 * Resolve `config.fallbackModel` with the same auth rules as the primary path.
-	 * Exposed so the consolidation stages can retry a failed model call once.
-	 * Returns `ok: false` when unset, identical to the configured primary, absent
-	 * from the registry, or carrying no usable credentials.
-	 */
-	async resolveFallbackModel(ctx: ResolveCtx): Promise<ResolveResult> {
-		const target = this.config.fallbackModel;
-		if (!target) return { ok: false, reason: "no fallback model configured" };
-		// Misconfiguration guard: a fallback identical to the effective primary would
-		// re-run the exact failure instead of adding a second chance. The effective
-		// primary is the configured model when it resolves, else the session model,
-		// matching `resolvePrimaryModel`.
-		const configured = this.config.model;
-		const configuredResolved = configured
-			? (ctx.modelRegistry.find(configured.provider, configured.id) as { provider?: string; id?: string } | undefined)
-			: undefined;
-		const effectivePrimary = (configuredResolved ?? (ctx.model as { provider?: string; id?: string } | undefined));
-		if (effectivePrimary && effectivePrimary.provider === target.provider && effectivePrimary.id === target.id) {
-			return { ok: false, reason: `fallback model ${target.provider}/${target.id} is identical to the effective primary model` };
-		}
-		const model = ctx.modelRegistry.find(target.provider, target.id);
-		if (!model) return { ok: false, reason: `fallback model ${target.provider}/${target.id} not found` };
-		return this.resolveCandidate(ctx, model);
 	}
 
 	/** Apply Pi's request-auth acceptance rule to one already-selected model. */
@@ -374,14 +337,6 @@ export class Runtime {
 		});
 		this.consolidationPromise = promise;
 		return promise;
-	}
-
-	/** Abort the in-flight consolidation run, if any. Returns true when one was running. */
-	abortConsolidation(): boolean {
-		const controller = this.consolidationAbortController;
-		if (!controller || !this.consolidationInFlight) return false;
-		controller.abort();
-		return true;
 	}
 
 	recordConsolidationStageError(ctx: LaunchCtx, phase: ConsolidationPhase, error: unknown): string {

@@ -9,7 +9,7 @@ import {
 import { resolveCompactionMaxRetainedTokens, resolveCompactionSummaryMaxTokens } from "../config.js";
 import { estimateStringTokens } from "../tokens.js";
 import { debugLog, withDebugLogContext, type DebugLogContext } from "../debug-log.js";
-import type { Runtime } from "../runtime.js";
+import type { OmpExtensionContext, Runtime } from "../runtime.js";
 import { catchUpObserver } from "./compaction-catch-up.js";
 import {
 	OM_OBSERVATIONS_RECORDED,
@@ -156,7 +156,7 @@ function debugContext(runtime: Runtime, ctx: ExtensionContext): DebugLogContext 
 	};
 }
 
-async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEvent, ctx: ExtensionContext, runtime: Runtime) {
+async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEvent, ctx: OmpExtensionContext, runtime: Runtime) {
 	const { preparation, branchEntries } = event;
 	const { firstKeptEntryId, tokensBefore } = preparation;
 	let entries = branchEntries as Entry[];
@@ -289,7 +289,7 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 }
 
 export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void {
-	pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: ExtensionContext) => {
+	pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: OmpExtensionContext) => {
 		if (runtime.compactHookInFlight) {
 			if (ctx.hasUI) {
 				ctx.ui.notify(

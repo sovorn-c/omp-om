@@ -4,8 +4,8 @@ import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { ObserverStreamError, runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
-import { resolveObserverChunkMaxTokens, resolveWorkerMemoryMaxTokens } from "../config.js";
-import type { ConsolidationPhase, ResolveCtx, ResolveResult, Runtime } from "../runtime.js";
+import { WORKER_THINKING_LEVEL, resolveObserverChunkMaxTokens, resolveWorkerMemoryMaxTokens } from "../config.js";
+import type { ConsolidationPhase, ResolveResult, Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
@@ -38,7 +38,7 @@ type ConsolidationCtx = {
 	cwd: string;
 	hasUI: boolean;
 	ui?: { notify: (message: string, type?: "warning" | "info" | "error") => void };
-	model: unknown;
+	models?: { resolve(spec: string): unknown };
 	modelRegistry: any;
 	getContextUsage?: () => { tokens?: number | null; contextWindow?: number } | undefined;
 	sessionManager: {
@@ -151,54 +151,28 @@ function workerHeadersFor(ctx: ConsolidationCtx, resolved: ResolvedModel): Resol
 	};
 }
 
-/** Thinking level for the worker call: the fallback's own setting wins when the fallback is active. */
-function workerThinkingLevel(runtime: Runtime, resolved: ResolvedModel) {
-	if (resolved.fallbackUsed === true) {
-		return runtime.config.fallbackModel?.thinking ?? runtime.config.model?.thinking ?? "low";
+function modelContextWindow(resolved: ResolvedModel): number | undefined {
+	const model = resolved.model;
+	if (model && typeof model === "object" && "contextWindow" in model && typeof model.contextWindow === "number") {
+		return model.contextWindow;
 	}
-	return runtime.config.model?.thinking ?? "low";
-}
-
-/**
- * Context window the observer chunk is sized against. The chunk is serialized
- * once and reused verbatim if the run falls back mid-call, so cap it to the
- * smaller of the primary and fallback windows: otherwise a large-context primary
- * plus a small-context fallback would send the fallback an over-context chunk and
- * make the retry fail for a reason the fallback cannot fix. When no fallback is
- * configured this is exactly the primary model's window.
- */
-function observerChunkContextWindow(runtime: Runtime, ctx: ConsolidationCtx, resolved: ResolvedModel): number | undefined {
-	const primary = (resolved.model as { contextWindow?: number } | undefined)?.contextWindow;
-	const fallback = runtime.config.fallbackModel;
-	if (!fallback) return primary;
-	const fallbackModel = ctx.modelRegistry.find?.(fallback.provider, fallback.id) as { contextWindow?: number } | undefined;
-	const usablePrimary = typeof primary === "number" && primary > 0 ? primary : undefined;
-	const fallbackWindow = fallbackModel?.contextWindow;
-	const usableFallback = typeof fallbackWindow === "number" && fallbackWindow > 0 ? fallbackWindow : undefined;
-	if (usablePrimary === undefined) return usableFallback;
-	if (usableFallback === undefined) return usablePrimary;
-	return Math.min(usablePrimary, usableFallback);
+	return undefined;
 }
 
 type ModelResolver = {
 	resolve: (stage: ConsolidationPhase) => Promise<ResolvedModel | undefined>;
-	/** Resolve the configured fallback, caching it for the rest of the pass. */
-	resolveFallback: (stage: ConsolidationPhase) => Promise<ResolvedModel | undefined>;
 };
 
+/**
+ * Resolve the one memory model once per pass. A resolution failure skips the
+ * stage (the caller aborts the pass) and is surfaced to the user once.
+ */
 function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): ModelResolver {
 	let cached: ResolveResult | undefined;
-	// Once the fallback proves usable, keep it for the rest of the pass so later
-	// stages do not re-pay a known-broken primary.
-	let fallbackActive: ResolvedModel | undefined;
 
 	const resolve = async (stage: ConsolidationPhase): Promise<ResolvedModel | undefined> => {
-		if (fallbackActive) {
-			runtime.resolveFailureNotified = false;
-			return fallbackActive;
-		}
 		cached ??= await runtime.resolveModel({
-			model: ctx.model,
+			models: ctx.models,
 			modelRegistry: ctx.modelRegistry,
 			hasUI: ctx.hasUI,
 			ui: ctx.ui,
@@ -215,120 +189,15 @@ function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): ModelResolv
 		return undefined;
 	};
 
-	const resolveFallback = async (stage: ConsolidationPhase): Promise<ResolvedModel | undefined> => {
-		if (fallbackActive) return fallbackActive;
-		const resolveFallbackModel = runtime.resolveFallbackModel;
-		if (typeof resolveFallbackModel !== "function") {
-			debugLog(`${stage}.fallback_unavailable`, { reason: "runtime exposes no resolveFallbackModel" });
-			return undefined;
-		}
-		const resolvedCtx: ResolveCtx = {
-			model: ctx.model,
-			modelRegistry: ctx.modelRegistry,
-			hasUI: ctx.hasUI,
-			ui: ctx.ui,
-		};
-		const result = await resolveFallbackModel.call(runtime, resolvedCtx);
-		if (!result.ok) {
-			debugLog(`${stage}.fallback_unavailable`, { reason: result.reason });
-			return undefined;
-		}
-		const resolved = workerHeadersFor(ctx, { ...result, fallbackUsed: true });
-		fallbackActive = resolved;
-		debugLog(`${stage}.fallback_active`, {
-			provider: (resolved.model as { provider?: string })?.provider,
-			id: (resolved.model as { id?: string })?.id,
-		});
-		return resolved;
-	};
-
-	return { resolve, resolveFallback };
+	return { resolve };
 }
 
-/**
- * Run one worker stage against the resolved primary model, retrying once with the
- * configured fallback model when the call throws. A stage that already resolved
- * through the fallback (resolution-time fallback) is not retried again — its error
- * is final. The last error thrown is what the caller sees, so the existing
- * stream-error classification and failure recording stay intact.
- */
-async function runStageWithFallback<T>(
-	ctx: ConsolidationCtx,
-	stage: ConsolidationPhase,
-	resolved: ResolvedModel,
-	resolver: ModelResolver,
-	work: (model: ResolvedModel) => Promise<T>,
-	signal?: AbortSignal,
-): Promise<T> {
-	try {
-		return await work(resolved);
-	} catch (primaryError) {
-		// An aborted run (consolidateWhenIdle yielding to the session) is not a
-		// model failure: retrying with the fallback would defeat the abort.
-		if (signal?.aborted) throw primaryError;
-		if (resolved.fallbackUsed === true) throw primaryError;
-		const fallback = await resolver.resolveFallback(stage);
-		if (!fallback) throw primaryError;
-		const message = primaryError instanceof Error ? primaryError.message : String(primaryError);
-		debugLog(`${stage}.fallback_retry`, {
-			primaryError: message,
-			provider: (fallback.model as { provider?: string })?.provider,
-			id: (fallback.model as { id?: string })?.id,
-		});
-		if (ctx.hasUI && ctx.ui) {
-			ctx.ui.notify(
-				`Observational memory: ${stage} failed (${message}); retrying with fallback model`,
-				"warning",
-			);
-		}
-		return await work(fallback);
-	}
-}
-
-export type ConsolidationTriggerHooks = {
-	/**
-	 * Called after an idle-mode consolidation run finishes (or is skipped) with
-	 * the `agent_settled` extension context that launched it, so work that shares
-	 * the settled event (proactive compaction) gets its turn afterwards.
-	 */
-	afterIdleConsolidation?: (ctx: unknown) => void;
-};
-
-export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime, hooks: ConsolidationTriggerHooks = {}): void {
-	const idleMode = (ctx: ConsolidationCtx): boolean => {
-		runtime.ensureConfig(ctx.cwd);
-		return runtime.config.consolidateWhenIdle === true;
-	};
-
+export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
 	pi.on("agent_start", (_event: unknown, ctx: ConsolidationCtx) => {
-		if (!idleMode(ctx)) {
-			maybeLaunchConsolidation(pi, runtime, ctx);
-			return;
-		}
-		// The session model is about to be called: get memory workers off the
-		// shared server. Coverage markers are only appended on success, so an
-		// aborted run simply retries after the next settled event.
-		if (runtime.abortConsolidation?.()) {
-			debugLog("consolidation.aborted", { reason: "agent_start" });
-			if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
-				"Observational memory: memory workers paused while the agent runs (consolidateWhenIdle)",
-				"info",
-			);
-		}
-	});
-	pi.on("turn_end", (_event: unknown, ctx: ConsolidationCtx) => {
-		if (idleMode(ctx)) return;
 		maybeLaunchConsolidation(pi, runtime, ctx);
 	});
-	pi.on("agent_settled", (_event: unknown, ctx: ConsolidationCtx) => {
-		if (!idleMode(ctx)) return;
-		const launched = maybeLaunchConsolidation(pi, runtime, ctx);
-		if (!hooks.afterIdleConsolidation) return;
-		if (!launched) {
-			hooks.afterIdleConsolidation(ctx);
-			return;
-		}
-		void launched.finally(() => hooks.afterIdleConsolidation?.(ctx));
+	pi.on("turn_end", (_event: unknown, ctx: ConsolidationCtx) => {
+		maybeLaunchConsolidation(pi, runtime, ctx);
 	});
 }
 
@@ -357,7 +226,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		cwd: ctx.cwd,
 		hasUI: ctx.hasUI,
 		ui: ctx.ui,
-		model: ctx.model,
+		models: ctx.models,
 		modelRegistry: ctx.modelRegistry,
 		getContextUsage: ctx.getContextUsage,
 		sessionManager: ctx.sessionManager,
@@ -469,7 +338,7 @@ async function runObserverStage(
 	// labels and rendered message content. Complete entries are kept intact.
 	// Only a first entry that cannot fit by itself is represented by a clearly
 	// marked head/tail excerpt; the original ledger entry remains untouched.
-	const contextWindow = observerChunkContextWindow(runtime, ctx, resolved);
+	const contextWindow = modelContextWindow(resolved);
 	const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
 	const {
 		text: chunk,
@@ -515,11 +384,11 @@ async function runObserverStage(
 
 	let observations: Observation[] | undefined;
 	try {
-		observations = await runStageWithFallback(ctx, "observer", resolved, resolver, (worker) => runObserver({
-			model: worker.model as any,
-			apiKey: worker.apiKey,
-			headers: worker.headers,
-			env: worker.env,
+		observations = await runObserver({
+			model: resolved.model as any,
+			apiKey: resolved.apiKey,
+			headers: resolved.headers,
+			env: resolved.env,
 			priorReflections,
 			priorObservations,
 			chunk,
@@ -527,9 +396,9 @@ async function runObserverStage(
 			maxTurns: runtime.config.agentMaxTurns,
 			maxOutputTokens: runtime.config.agentMaxTokens,
 			signal: consolidationSignal(runtime),
-			thinkingLevel: workerThinkingLevel(runtime, worker),
+			thinkingLevel: WORKER_THINKING_LEVEL,
 			modelRegistry: ctx.modelRegistry,
-		}), consolidationSignal(runtime));
+		});
 	} catch (error) {
 		if (wasAborted(runtime)) {
 			debugLog("observer.aborted", { coversUpToId });
@@ -601,26 +470,24 @@ async function runReflectorStage(
 	}
 
 	const folded = foldLedger(entries);
-	const reflections = await runStageWithFallback(ctx, "reflector", resolved, resolver, (worker) => {
-		const reflectorMemory = boundWorkerMemory(
-			folded.reflections,
-			folded.activeObservations,
-			resolveWorkerMemoryMaxTokens(runtime.config, (worker.model as { contextWindow?: number }).contextWindow),
-		);
-		return runReflector({
-			model: worker.model as any,
-			apiKey: worker.apiKey,
-			headers: worker.headers,
-			env: worker.env,
-			reflections: reflectorMemory.reflections,
-			observations: reflectorMemory.observations,
-			maxTurns: runtime.config.agentMaxTurns,
-			maxOutputTokens: runtime.config.agentMaxTokens,
-			signal: consolidationSignal(runtime),
-			thinkingLevel: workerThinkingLevel(runtime, worker),
-			modelRegistry: ctx.modelRegistry,
-		});
-	}, consolidationSignal(runtime));
+	const reflectorMemory = boundWorkerMemory(
+		folded.reflections,
+		folded.activeObservations,
+		resolveWorkerMemoryMaxTokens(runtime.config, modelContextWindow(resolved)),
+	);
+	const reflections = await runReflector({
+		model: resolved.model as any,
+		apiKey: resolved.apiKey,
+		headers: resolved.headers,
+		env: resolved.env,
+		reflections: reflectorMemory.reflections,
+		observations: reflectorMemory.observations,
+		maxTurns: runtime.config.agentMaxTurns,
+		maxOutputTokens: runtime.config.agentMaxTokens,
+		signal: consolidationSignal(runtime),
+		thinkingLevel: WORKER_THINKING_LEVEL,
+		modelRegistry: ctx.modelRegistry,
+	});
 	if (wasAborted(runtime)) {
 		debugLog("reflector.aborted", {});
 		return { outcome: "abort", sameRunReflections: [] };
@@ -692,29 +559,27 @@ async function runDropperStage(
 	}
 
 	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
-	const droppedIds = await runStageWithFallback(ctx, "dropper", resolved, resolver, (worker) => {
-		// The dropper prunes old observations, so it sees the oldest ones that fit.
-		const dropperMemory = boundWorkerMemory(
-			reflectionsForDropper,
-			folded.activeObservations,
-			resolveWorkerMemoryMaxTokens(runtime.config, (worker.model as { contextWindow?: number }).contextWindow),
-			{ observationsFrom: "oldest" },
-		);
-		return runDropper({
-			model: worker.model as any,
-			apiKey: worker.apiKey,
-			headers: worker.headers,
-			env: worker.env,
-			reflections: dropperMemory.reflections,
-			observations: dropperMemory.observations,
-			targetTokens: runtime.config.observationsPoolTargetTokens,
-			maxTurns: runtime.config.agentMaxTurns,
-			maxOutputTokens: runtime.config.agentMaxTokens,
-			signal: consolidationSignal(runtime),
-			thinkingLevel: workerThinkingLevel(runtime, worker),
-			modelRegistry: ctx.modelRegistry,
-		});
-	}, consolidationSignal(runtime));
+	// The dropper prunes old observations, so it sees the oldest ones that fit.
+	const dropperMemory = boundWorkerMemory(
+		reflectionsForDropper,
+		folded.activeObservations,
+		resolveWorkerMemoryMaxTokens(runtime.config, modelContextWindow(resolved)),
+		{ observationsFrom: "oldest" },
+	);
+	const droppedIds = await runDropper({
+		model: resolved.model as any,
+		apiKey: resolved.apiKey,
+		headers: resolved.headers,
+		env: resolved.env,
+		reflections: dropperMemory.reflections,
+		observations: dropperMemory.observations,
+		targetTokens: runtime.config.observationsPoolTargetTokens,
+		maxTurns: runtime.config.agentMaxTurns,
+		maxOutputTokens: runtime.config.agentMaxTokens,
+		signal: consolidationSignal(runtime),
+		thinkingLevel: WORKER_THINKING_LEVEL,
+		modelRegistry: ctx.modelRegistry,
+	});
 	if (wasAborted(runtime)) {
 		debugLog("dropper.aborted", {});
 		return "abort";

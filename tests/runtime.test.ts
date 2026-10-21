@@ -2,51 +2,101 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Runtime } from "../src/runtime.js";
 
-function modelRegistry(args: { found?: unknown; auth?: unknown } = {}) {
+function modelRegistry(args: { auth?: unknown } = {}) {
 	return {
-		find: vi.fn(() => args.found),
 		getApiKeyAndHeaders: vi.fn(async () => args.auth ?? { ok: true, apiKey: "key", headers: { test: "yes" } }),
 	};
 }
 
-describe("Runtime V3 behavior", () => {
-	it("uses configured model when present", async () => {
+/** `ctx.models` stub shaped like omp's: sync `resolve(spec)` returning the Model or `undefined`. */
+function models(resolved: unknown) {
+	return { resolve: vi.fn((_spec: string) => resolved) };
+}
+
+describe("Runtime single-model resolution", () => {
+	it('resolves "@smol" through ctx.models.resolve', async () => {
+		const runtime = new Runtime();
+		const smol = { provider: "anthropic", id: "haiku" };
+		const ctxModels = models(smol);
+		const registry = modelRegistry();
+
+		const result = await runtime.resolveModel({ models: ctxModels, modelRegistry: registry, hasUI: false });
+
+		expect(runtime.config.model).toBe("@smol");
+		expect(ctxModels.resolve).toHaveBeenCalledTimes(1);
+		expect(ctxModels.resolve).toHaveBeenCalledWith("@smol");
+		expect(registry.getApiKeyAndHeaders).toHaveBeenCalledWith(smol);
+		expect(result).toEqual({ ok: true, model: smol, apiKey: "key", headers: { test: "yes" } });
+	});
+
+	it("resolves the configured spec, not the session model", async () => {
 		const runtime = new Runtime();
 		const configured = { provider: "anthropic", id: "configured" };
-		const registry = modelRegistry({ found: configured });
-		runtime.config = { ...runtime.config, model: { provider: "anthropic", id: "configured" } };
+		const ctxModels = models(configured);
+		runtime.config = { ...runtime.config, model: "anthropic/configured" };
 
-		const result = await runtime.resolveModel({ model: { provider: "openai" }, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: ctxModels, modelRegistry: modelRegistry(), hasUI: false });
 
-		expect(registry.find).toHaveBeenCalledWith("anthropic", "configured");
-		expect(result).toEqual({ ok: true, model: configured, apiKey: "key", headers: { test: "yes" } });
+		expect(ctxModels.resolve).toHaveBeenCalledWith("anthropic/configured");
+		expect(result).toMatchObject({ ok: true, model: configured });
 	});
 
-	it("falls back to session model and notifies when configured model is missing", async () => {
+	it("unresolvable spec returns ok:false with reason naming the spec", async () => {
+		const runtime = new Runtime();
+		runtime.config = { ...runtime.config, model: "nonsense/does-not-exist" };
+		const registry = modelRegistry();
+
+		const result = await runtime.resolveModel({ models: models(undefined), modelRegistry: registry, hasUI: false });
+
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error("expected failure");
+		expect(result.reason).toContain('"nonsense/does-not-exist"');
+		expect(registry.getApiKeyAndHeaders).not.toHaveBeenCalled();
+	});
+
+	it("does not notify or fall back to another model when the spec is unresolvable", async () => {
 		const runtime = new Runtime();
 		const notify = vi.fn();
-		const sessionModel = { provider: "openai" };
-		const registry = modelRegistry();
-		runtime.config = { ...runtime.config, model: { provider: "anthropic", id: "missing" } };
 
-		const result = await runtime.resolveModel({ model: sessionModel, modelRegistry: registry, hasUI: true, ui: { notify } });
+		const result = await runtime.resolveModel({ models: models(undefined), modelRegistry: modelRegistry(), hasUI: true, ui: { notify } });
 
-		expect(result).toMatchObject({ ok: true, model: sessionModel });
-		expect(notify).toHaveBeenCalledWith(
-			"Observational memory: configured model anthropic/missing not found, using session model",
-			"warning",
-		);
+		expect(result.ok).toBe(false);
+		expect(notify).not.toHaveBeenCalled();
 	});
 
-	it("returns model resolution failures", async () => {
+	it("never throws: a throwing resolver, auth lookup, or missing facade becomes ok:false", async () => {
 		const runtime = new Runtime();
-		await expect(runtime.resolveModel({ model: undefined, modelRegistry: modelRegistry(), hasUI: false })).resolves.toEqual({
-			ok: false,
-			reason: "no model available (session has no model and no observational-memory model configured)",
-		});
+		const model = { provider: "anthropic", id: "haiku" };
 
-		const registry = modelRegistry({ auth: { ok: false } });
-		await expect(runtime.resolveModel({ model: { provider: "anthropic" }, modelRegistry: registry, hasUI: false })).resolves.toEqual({
+		const throwingResolve = await runtime.resolveModel({
+			models: { resolve: () => { throw new Error("boom"); } },
+			modelRegistry: modelRegistry(),
+			hasUI: false,
+		});
+		expect(throwingResolve).toMatchObject({ ok: false });
+		if (throwingResolve.ok) throw new Error("expected failure");
+		expect(throwingResolve.reason).toContain("boom");
+
+		const throwingAuth = await runtime.resolveModel({
+			models: models(model),
+			modelRegistry: { getApiKeyAndHeaders: async () => { throw new Error("auth boom"); } },
+			hasUI: false,
+		});
+		expect(throwingAuth).toMatchObject({ ok: false });
+		if (throwingAuth.ok) throw new Error("expected failure");
+		expect(throwingAuth.reason).toContain("auth boom");
+
+		const noFacade = await runtime.resolveModel({ modelRegistry: modelRegistry(), hasUI: false });
+		expect(noFacade).toMatchObject({ ok: false });
+		if (noFacade.ok) throw new Error("expected failure");
+		expect(noFacade.reason).toContain("ctx.models is unavailable");
+	});
+
+	it("returns auth failures", async () => {
+		const runtime = new Runtime();
+		const registry = modelRegistry({ auth: { ok: false, error: 'No API key found for "anthropic"' } });
+
+		await expect(runtime.resolveModel({ models: models({ provider: "anthropic" }), modelRegistry: registry, hasUI: false })).resolves.toEqual({
 			ok: false,
 			reason: 'no API key or auth headers for provider "anthropic"',
 		});
@@ -59,7 +109,7 @@ describe("Runtime V3 behavior", () => {
 			auth: { ok: true, apiKey: undefined, headers: { Authorization: "Bearer oauth-token" } },
 		});
 
-		const result = await runtime.resolveModel({ model, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false });
 
 		expect(result).toEqual({
 			ok: true,
@@ -74,17 +124,45 @@ describe("Runtime V3 behavior", () => {
 		const model = { provider: "anthropic", id: "claude" };
 		const registry = modelRegistry({ auth: { ok: true, apiKey: "sk-ant-key" } });
 
-		const result = await runtime.resolveModel({ model, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false });
 
 		expect(result).toEqual({ ok: true, model, apiKey: "sk-ant-key", headers: undefined });
 	});
 
+	it("accepts ambient-auth providers (ok:true, apiKey undefined) when pi reports a configured credential", async () => {
+		const runtime = new Runtime();
+		const model = { provider: "amazon-bedrock", id: "us.anthropic.claude-sonnet-4-5" };
+		const registry = {
+			getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: undefined, headers: undefined })),
+			hasConfiguredAuth: vi.fn((candidate: unknown) => candidate === model),
+			isUsingOAuth: vi.fn(() => false),
+		};
+
+		const result = await runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false });
+
+		expect(registry.hasConfiguredAuth).toHaveBeenCalledWith(model);
+		expect(result).toEqual({ ok: true, model, apiKey: undefined, headers: undefined, env: undefined, baseUrl: undefined });
+	});
+
+	it("still rejects an empty resolution when pi reports no credential source", async () => {
+		const runtime = new Runtime();
+		const model = { provider: "amazon-bedrock", id: "us.anthropic.claude-sonnet-4-5" };
+		const registry = {
+			getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: undefined, headers: undefined })),
+			hasConfiguredAuth: vi.fn(() => false),
+			isUsingOAuth: vi.fn(() => false),
+		};
+
+		await expect(runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false })).resolves.toEqual({
+			ok: false,
+			reason: 'no API key or auth headers for provider "amazon-bedrock"',
+		});
+	});
+
 	it.each([
-		{ configured: false, headersOnly: false },
-		{ configured: true, headersOnly: false },
-		{ configured: false, headersOnly: true },
-		{ configured: true, headersOnly: true },
-	])("applies auth baseUrl without mutating the model (configured=$configured, headersOnly=$headersOnly)", async ({ configured, headersOnly }) => {
+		{ headersOnly: false },
+		{ headersOnly: true },
+	])("applies auth baseUrl without mutating the model (headersOnly=$headersOnly)", async ({ headersOnly }) => {
 		const runtime = new Runtime();
 		const model = Object.freeze({
 			provider: "github-copilot",
@@ -96,11 +174,9 @@ describe("Runtime V3 behavior", () => {
 		const baseUrl = "https://api.business.githubcopilot.com";
 		const apiKey = headersOnly ? undefined : "test-key";
 		const headers = { Authorization: "Bearer test-token" };
-		const registry = modelRegistry({ found: model, auth: { ok: true, apiKey, headers, baseUrl } });
-		const sessionModel = configured ? { provider: "openai", id: "session-model" } : model;
-		if (configured) runtime.config = { ...runtime.config, model: { provider: model.provider, id: model.id } };
+		const registry = modelRegistry({ auth: { ok: true, apiKey, headers, baseUrl } });
 
-		const result = await runtime.resolveModel({ model: sessionModel, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false });
 
 		expect(registry.getApiKeyAndHeaders).toHaveBeenCalledWith(model);
 		expect(result).toMatchObject({ ok: true, model: { ...model, baseUrl }, apiKey, headers });
@@ -114,7 +190,7 @@ describe("Runtime V3 behavior", () => {
 		const model = Object.freeze({ provider: "openai", id: "test-model", baseUrl: "https://example.com/v1" });
 		const registry = modelRegistry({ auth: { ok: true, apiKey: "test-key", baseUrl } });
 
-		const result = await runtime.resolveModel({ model, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false });
 
 		if (!result.ok) throw new Error("model resolution failed");
 		expect(result.model).toBe(model);
@@ -131,7 +207,7 @@ describe("Runtime V3 behavior", () => {
 			{ ok: true, headers: { Authorization: "" } },
 		]) {
 			const registry = modelRegistry({ auth });
-			await expect(runtime.resolveModel({ model, modelRegistry: registry, hasUI: false })).resolves.toEqual({
+			await expect(runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false })).resolves.toEqual({
 				ok: false,
 				reason: 'no API key or auth headers for provider "xai"',
 			});
@@ -146,7 +222,7 @@ describe("Runtime V3 behavior", () => {
 			isUsingOAuth: vi.fn((candidate: { provider?: string }) => candidate?.provider === "openai-codex"),
 		};
 
-		const result = await runtime.resolveModel({ model, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false });
 
 		expect(registry.isUsingOAuth).toHaveBeenCalledWith(model);
 		expect(result).toEqual({
@@ -155,12 +231,36 @@ describe("Runtime V3 behavior", () => {
 		});
 	});
 
+	it("forwards env and baseUrl from model registry", async () => {
+		const runtime = new Runtime();
+		const model = { provider: "cloudflare-workers-ai", id: "@cf/mistralai/mistral-small-3.1-24b-instruct" };
+		const registry = modelRegistry({
+			auth: {
+				ok: true,
+				apiKey: "test-key",
+				headers: { Authorization: "Bearer test" },
+				env: { CLOUDFLARE_ACCOUNT_ID: "abc123" },
+				baseUrl: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+			}
+		});
+
+		const result = await runtime.resolveModel({ models: models(model), modelRegistry: registry, hasUI: false });
+
+		expect(result).toEqual({
+			ok: true,
+			model: { ...model, baseUrl: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1" },
+			apiKey: "test-key",
+			headers: { Authorization: "Bearer test" },
+			env: { CLOUDFLARE_ACCOUNT_ID: "abc123" },
+			baseUrl: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+		});
+	});
+});
+
+describe("Runtime task state", () => {
 	it("tracks consolidation task state", async () => {
 		const runtime = new Runtime();
-		let release: (() => void) | undefined;
-		const work = new Promise<void>((resolve) => {
-			release = resolve;
-		});
+		const { promise: work, resolve: release } = Promise.withResolvers<void>();
 
 		const promise = runtime.launchConsolidationTask({ hasUI: false }, async () => {
 			runtime.consolidationPhase = "observer";
@@ -170,7 +270,7 @@ describe("Runtime V3 behavior", () => {
 		expect(runtime.consolidationInFlight).toBe(true);
 		expect(runtime.consolidationPromise).toBe(promise);
 		expect(runtime.consolidationPhase).toBe("observer");
-		release?.();
+		release();
 		await promise;
 		expect(runtime.consolidationInFlight).toBe(false);
 		expect(runtime.consolidationPromise).toBeNull();
@@ -193,182 +293,10 @@ describe("Runtime V3 behavior", () => {
 		expect(notify).toHaveBeenCalledWith("Observational memory: dropper failed: drop failed", "warning");
 	});
 
-	it("keeps compaction flags independent", () => {
+	it("keeps the compaction hook flag independent of consolidation", () => {
 		const runtime = new Runtime();
-		runtime.compactInFlight = true;
 		runtime.compactHookInFlight = true;
 		expect(runtime.consolidationInFlight).toBe(false);
 		expect(runtime.consolidationPhase).toBeUndefined();
-	});
-
-	it("forwards env and baseUrl from model registry", async () => {
-		const runtime = new Runtime();
-		const model = { provider: "cloudflare-workers-ai", id: "@cf/mistralai/mistral-small-3.1-24b-instruct" };
-		const registry = modelRegistry({
-			auth: {
-				ok: true,
-				apiKey: "test-key",
-				headers: { Authorization: "Bearer test" },
-				env: { CLOUDFLARE_ACCOUNT_ID: "abc123" },
-				baseUrl: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
-			}
-		});
-
-		const result = await runtime.resolveModel({ model, modelRegistry: registry, hasUI: false });
-
-		expect(result).toEqual({
-			ok: true,
-			model: { ...model, baseUrl: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1" },
-			apiKey: "test-key",
-			headers: { Authorization: "Bearer test" },
-			env: { CLOUDFLARE_ACCOUNT_ID: "abc123" },
-			baseUrl: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
-		});
-	});
-
-	describe("fallback model", () => {
-		const FALLBACK = { provider: "opencode-go", id: "deepseek-v4.1-flash" };
-
-		function fallbackRegistry(primaryAuth: unknown, fallbackAuth: unknown) {
-			return {
-				find: vi.fn((provider: string, id: string) =>
-					provider === FALLBACK.provider && id === FALLBACK.id ? { ...FALLBACK } : undefined,
-				),
-				getApiKeyAndHeaders: vi.fn(async (model: { provider?: string }) =>
-					model.provider === FALLBACK.provider ? fallbackAuth : primaryAuth,
-				),
-				isUsingOAuth: vi.fn(() => false),
-			};
-		}
-
-		it("resolves the fallback when the primary model has no usable auth", async () => {
-			const runtime = new Runtime();
-			const notify = vi.fn();
-			runtime.config = { ...runtime.config, model: { provider: "anthropic", id: "haiku" }, fallbackModel: { ...FALLBACK } };
-			const registry = fallbackRegistry({ ok: false, error: "expired" }, { ok: true, apiKey: "go-key" });
-
-			const result = await runtime.resolveModel({
-				model: { provider: "session" },
-				modelRegistry: registry,
-				hasUI: true,
-				ui: { notify },
-			});
-
-			expect(result).toMatchObject({ ok: true, model: FALLBACK, apiKey: "go-key", fallbackUsed: true });
-			if (!result.ok) throw new Error("model resolution failed");
-			expect(result.primaryFailure).toContain("no API key or auth headers");
-			expect(notify).toHaveBeenCalledWith(
-				expect.stringContaining("using fallback opencode-go/deepseek-v4.1-flash"),
-				"warning",
-			);
-		});
-
-		it("does not consult the fallback when the primary model resolves", async () => {
-			const runtime = new Runtime();
-			const primary = { provider: "anthropic", id: "haiku" };
-			runtime.config = { ...runtime.config, fallbackModel: { ...FALLBACK } };
-			const registry = {
-				find: vi.fn(() => ({ ...FALLBACK })),
-				getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "primary-key" })),
-			};
-
-			const result = await runtime.resolveModel({ model: primary, modelRegistry: registry, hasUI: false });
-
-			expect(result).toEqual({ ok: true, model: primary, apiKey: "primary-key", headers: undefined });
-			expect(registry.find).not.toHaveBeenCalled();
-		});
-
-		it("reports both reasons when the primary and the fallback both fail", async () => {
-			const runtime = new Runtime();
-			runtime.config = { ...runtime.config, fallbackModel: { ...FALLBACK } };
-			const registry = { ...fallbackRegistry({ ok: false }, { ok: false }), isUsingOAuth: vi.fn(() => false) };
-
-			const result = await runtime.resolveModel({
-				model: { provider: "anthropic" },
-				modelRegistry: registry,
-				hasUI: false,
-			});
-
-			expect(result.ok).toBe(false);
-			if (result.ok) throw new Error("expected failure");
-			expect(result.reason).toContain('no API key or auth headers for provider "anthropic"');
-			expect(result.reason).toContain('no API key or auth headers for provider "opencode-go"');
-		});
-
-		it("resolveFallbackModel reports unset, identical, and missing fallbacks", async () => {
-			const runtime = new Runtime();
-			const registry = {
-				find: vi.fn((provider: string) => (provider === "anthropic" ? { provider: "anthropic", id: "haiku" } : undefined)),
-				getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "k" })),
-			};
-
-			await expect(runtime.resolveFallbackModel({ model: undefined, modelRegistry: registry, hasUI: false })).resolves.toEqual({
-				ok: false,
-				reason: "no fallback model configured",
-			});
-
-			runtime.config = { ...runtime.config, model: { provider: "anthropic", id: "haiku" }, fallbackModel: { provider: "anthropic", id: "haiku" } };
-			await expect(runtime.resolveFallbackModel({ model: undefined, modelRegistry: registry, hasUI: false })).resolves.toEqual({
-				ok: false,
-				reason: "fallback model anthropic/haiku is identical to the effective primary model",
-			});
-
-			runtime.config = { ...runtime.config, model: undefined, fallbackModel: { provider: "anthropic", id: "haiku" } };
-			await expect(runtime.resolveFallbackModel({ model: { provider: "anthropic", id: "haiku" }, modelRegistry: registry, hasUI: false })).resolves.toEqual({
-				ok: false,
-				reason: "fallback model anthropic/haiku is identical to the effective primary model",
-			});
-
-			runtime.config = { ...runtime.config, fallbackModel: { ...FALLBACK } };
-			await expect(runtime.resolveFallbackModel({ model: undefined, modelRegistry: registry, hasUI: false })).resolves.toEqual({
-				ok: false,
-				reason: "fallback model opencode-go/deepseek-v4.1-flash not found",
-			});
-		});
-
-		it("resolveFallbackModel handles OAuth fallback with expired credentials", async () => {
-			const runtime = new Runtime();
-			const fallback = { provider: "openai-codex", id: "gpt-5-codex" };
-			runtime.config = { ...runtime.config, fallbackModel: fallback };
-			const registry = {
-				find: vi.fn(() => fallback),
-				getApiKeyAndHeaders: vi.fn(async () => ({ ok: false, error: "refresh failed" })),
-				isUsingOAuth: vi.fn((model: unknown) => model === fallback),
-			};
-
-			const result = await runtime.resolveFallbackModel({ model: { provider: "anthropic", id: "haiku" }, modelRegistry: registry, hasUI: false });
-
-			expect(registry.isUsingOAuth).toHaveBeenCalledWith(fallback);
-			expect(result).toEqual({
-				ok: false,
-				reason: 'authentication failed for provider "openai-codex" — OAuth credentials may have expired; run \'/login openai-codex\' to re-authenticate',
-			});
-		});
-
-		it("resolveFallbackModel handles request-time signing fallback (Bedrock/Vertex pattern)", async () => {
-			const runtime = new Runtime();
-			const fallback = { provider: "amazon-bedrock", id: "us.anthropic.claude-sonnet-4-5" };
-			runtime.config = { ...runtime.config, fallbackModel: fallback };
-			const registry = {
-				find: vi.fn(() => fallback),
-				getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: undefined, headers: undefined })),
-				hasConfiguredAuth: vi.fn((model: unknown) => model === fallback),
-			};
-
-			const result = await runtime.resolveFallbackModel({ model: { provider: "anthropic", id: "haiku" }, modelRegistry: registry, hasUI: false });
-
-			expect(registry.hasConfiguredAuth).toHaveBeenCalledWith(fallback);
-			expect(result).toEqual({ ok: true, model: fallback, apiKey: undefined, headers: undefined, env: undefined, baseUrl: undefined });
-		});
-
-		it("resolveFallbackModel applies the same auth rules as the primary path", async () => {
-			const runtime = new Runtime();
-			runtime.config = { ...runtime.config, model: { provider: "anthropic", id: "haiku" }, fallbackModel: { ...FALLBACK } };
-			const registry = fallbackRegistry({ ok: true, apiKey: "primary" }, { ok: true, headers: { Authorization: "Bearer go" } });
-
-			const result = await runtime.resolveFallbackModel({ model: undefined, modelRegistry: registry, hasUI: false });
-
-			expect(result).toEqual({ ok: true, model: FALLBACK, apiKey: undefined, headers: { Authorization: "Bearer go" } });
-		});
 	});
 });

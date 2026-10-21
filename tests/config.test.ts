@@ -1,315 +1,213 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const mock = vi.hoisted(() => ({ agentDir: "" }));
-
-vi.mock("@earendil-works/pi-coding-agent", () => ({
-	getAgentDir: () => mock.agentDir,
-}));
-
-import { DEFAULTS, loadConfig, readEnvConfig, resolveCompactAfterTokens } from "../src/config.js";
+import { DEFAULTS, loadConfig, readEnvConfig } from "../src/config.js";
 
 function writeJson(path: string, value: unknown) {
 	mkdirSync(join(path, ".."), { recursive: true });
 	writeFileSync(path, JSON.stringify(value), "utf-8");
 }
 
-describe("V3 config", () => {
+describe("omp-om config", () => {
 	let root: string;
 	let cwd: string;
 	let agentDir: string;
+	let globalPath: string;
+	let projectPath: string;
 
 	beforeEach(() => {
-		root = `${tmpdir()}/om-v3-config-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+		root = `${tmpdir()}/om-config-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 		cwd = join(root, "project");
 		agentDir = join(root, "agent");
+		globalPath = join(agentDir, "omp-om.json");
+		projectPath = join(cwd, ".omp", "omp-om.json");
 		mkdirSync(cwd, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
-		mock.agentDir = agentDir;
 	});
 
 	afterEach(() => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("uses V3 defaults", () => {
+	it("defaults to model \"@smol\" when no files exist", () => {
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+
+		expect(config.model).toBe("@smol");
+		expect(warnings).toEqual([]);
+		expect(config).toEqual(DEFAULTS);
+	});
+
+	it("keeps the Pi OM trigger defaults and drops the removed keys", () => {
 		expect(DEFAULTS).toEqual({
 			observeAfterTokens: 10000,
 			reflectAfterTokens: 20000,
-			compactAfterTokens: 81000,
-			compactAfterTokensMode: "calibrated",
-			compactAfterTokensRatio: 0.68,
 			observationsPoolMaxTokens: 20000,
 			observationsPoolTargetTokens: 10000,
 			agentMaxTurns: 16,
 			agentMaxTokens: 32000,
 			compactionCatchUpMaxChunks: 2,
-			consolidateWhenIdle: false,
+			model: "@smol",
 			showWorkerNotifications: true,
 			passive: false,
 			debugLog: false,
-			piAutoCompactionEnabled: true,
 		});
-		expect(loadConfig(cwd, {})).toEqual(DEFAULTS);
 	});
 
-	it("merges global, project, and env V3 settings in order", () => {
-		writeJson(join(agentDir, "settings.json"), {
-			"observational-memory": {
-				observeAfterTokens: 10,
-				reflectAfterTokens: 20,
-				compactAfterTokens: 30,
-				observationsPoolMaxTokens: 40,
-				observationsPoolTargetTokens: 15,
-				agentMaxTurns: 5,
-				agentMaxTokens: 8192,
-				model: { provider: "anthropic", id: "global", thinking: "medium" },
-				showWorkerNotifications: true,
-				passive: false,
-				debugLog: true,
-			},
-		});
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				observeAfterTokens: 100,
-				model: { provider: "openai", id: "project", thinking: "low" },
-				showWorkerNotifications: false,
-			},
-		});
+	it("reads the global file from the agent dir", () => {
+		writeJson(globalPath, { model: "anthropic/claude-haiku-4-5", observeAfterTokens: 50 });
 
-		expect(loadConfig(cwd, { PI_OBSERVATIONAL_MEMORY_PASSIVE: "true" })).toMatchObject({
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+
+		expect(config).toMatchObject({ model: "anthropic/claude-haiku-4-5", observeAfterTokens: 50 });
+		expect(warnings).toEqual([]);
+	});
+
+	it("project file overrides global model", () => {
+		writeJson(globalPath, { model: "@slow", reflectAfterTokens: 30, debugLog: true });
+		writeJson(projectPath, { model: "openai/gpt-5-mini", observeAfterTokens: 100 });
+
+		const { config } = loadConfig(cwd, agentDir, {});
+
+		expect(config).toMatchObject({
+			model: "openai/gpt-5-mini",
 			observeAfterTokens: 100,
-			reflectAfterTokens: 20,
-			compactAfterTokens: 30,
-			observationsPoolMaxTokens: 40,
-			observationsPoolTargetTokens: 15,
-			agentMaxTurns: 5,
-			agentMaxTokens: 8192,
-			model: { provider: "openai", id: "project", thinking: "low" },
-			showWorkerNotifications: false,
-			passive: true,
+			reflectAfterTokens: 30,
 			debugLog: true,
 		});
 	});
 
-	it("accepts max as a valid model thinking level", () => {
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				model: { provider: "anthropic", id: "claude", thinking: "max" },
-			},
-		});
+	it("applies the passive env override last", () => {
+		writeJson(globalPath, { passive: false });
 
-		expect(loadConfig(cwd, {})).toMatchObject({
-			model: { provider: "anthropic", id: "claude", thinking: "max" },
-		});
+		expect(loadConfig(cwd, agentDir, { PI_OBSERVATIONAL_MEMORY_PASSIVE: "true" }).config.passive).toBe(true);
 	});
 
-	it("parses a fallback model and ignores invalid fallback values", () => {
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				model: { provider: "anthropic", id: "claude-haiku-4-5-20251001", thinking: "low" },
-				fallbackModel: { provider: "opencode-go", id: "deepseek-v4.1-flash", thinking: "low" },
-			},
-		});
+	it("malformed JSON yields defaults plus one warning", () => {
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(globalPath, "{ not json", "utf-8");
 
-		expect(loadConfig(cwd, {})).toMatchObject({
-			model: { provider: "anthropic", id: "claude-haiku-4-5-20251001", thinking: "low" },
-			fallbackModel: { provider: "opencode-go", id: "deepseek-v4.1-flash", thinking: "low" },
-		});
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
 
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				fallbackModel: { provider: "opencode-go", id: "deepseek-v4.1-flash", thinking: "huge" },
-			},
-		});
-		expect(loadConfig(cwd, {})).toMatchObject({
-			fallbackModel: { provider: "opencode-go", id: "deepseek-v4.1-flash" },
-		});
-
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": { fallbackModel: { provider: "", id: "deepseek-v4.1-flash" } },
-		});
-		expect(loadConfig(cwd, {})).toEqual(DEFAULTS);
+		expect(config).toEqual(DEFAULTS);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain(globalPath);
 	});
 
-	it("ignores invalid V3 values", () => {
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				observeAfterTokens: -1,
-				reflectAfterTokens: 0,
-				compactAfterTokens: 1.5,
-				observationsPoolMaxTokens: "20000",
-				observationsPoolTargetTokens: "10000",
-				agentMaxTurns: null,
-				model: { provider: "anthropic", id: "", thinking: "huge" },
-				showWorkerNotifications: "no",
-				passive: "yes",
-				debugLog: "true",
-			},
+	it("a malformed project file does not discard the valid global file", () => {
+		writeJson(globalPath, { model: "@slow" });
+		mkdirSync(join(cwd, ".omp"), { recursive: true });
+		writeFileSync(projectPath, "[1,2", "utf-8");
+
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+
+		expect(config.model).toBe("@slow");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain(projectPath);
+	});
+
+	it("a non-object top-level value yields defaults plus one warning", () => {
+		writeJson(globalPath, ["model", "@slow"]);
+
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+
+		expect(config).toEqual(DEFAULTS);
+		expect(warnings).toHaveLength(1);
+	});
+
+	it("removed keys (compactAfterTokens, consolidateWhenIdle) are ignored with a warning", () => {
+		writeJson(globalPath, {
+			compactAfterTokens: 30,
+			compactAfterTokensMode: "ratio",
+			compactAfterTokensRatio: 0.5,
+			consolidateWhenIdle: true,
+			fallbackModel: { provider: "openai", id: "x" },
+			observeAfterTokens: 77,
 		});
 
-		expect(loadConfig(cwd, {})).toEqual(DEFAULTS);
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+
+		expect(config).toEqual({ ...DEFAULTS, observeAfterTokens: 77 });
+		for (const key of ["compactAfterTokens", "compactAfterTokensMode", "compactAfterTokensRatio", "consolidateWhenIdle", "fallbackModel"]) {
+			expect(warnings.some((warning) => warning.includes(`"${key}"`))).toBe(true);
+		}
+		expect(warnings).toHaveLength(5);
+	});
+
+	it("rejects a non-string model with a warning and keeps the lower layer's model", () => {
+		writeJson(globalPath, { model: "@slow" });
+		writeJson(projectPath, { model: { provider: "anthropic", id: "claude" } });
+
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+
+		expect(config.model).toBe("@slow");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("model");
+	});
+
+	it("rejects an empty model string", () => {
+		writeJson(globalPath, { model: "" });
+
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+
+		expect(config.model).toBe("@smol");
+		expect(warnings).toHaveLength(1);
+	});
+
+	it("ignores invalid numeric and boolean values", () => {
+		writeJson(globalPath, {
+			observeAfterTokens: -1,
+			reflectAfterTokens: 0,
+			observationsPoolMaxTokens: "20000",
+			observationsPoolTargetTokens: "10000",
+			agentMaxTurns: null,
+			compactionCatchUpMaxChunks: -1,
+			showWorkerNotifications: "no",
+			passive: "yes",
+			debugLog: "true",
+		});
+
+		expect(loadConfig(cwd, agentDir, {}).config).toEqual(DEFAULTS);
+	});
+
+	it("accepts compactionCatchUpMaxChunks of 0 to disable catch-up", () => {
+		writeJson(globalPath, { compactionCatchUpMaxChunks: 0 });
+
+		expect(loadConfig(cwd, agentDir, {}).config.compactionCatchUpMaxChunks).toBe(0);
 	});
 
 	it("derives observation pool target from the final max when omitted", () => {
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				observationsPoolMaxTokens: 40,
-			},
-		});
+		writeJson(projectPath, { observationsPoolMaxTokens: 40 });
 
-		expect(loadConfig(cwd, {})).toMatchObject({
+		expect(loadConfig(cwd, agentDir, {}).config).toMatchObject({
 			observationsPoolMaxTokens: 40,
 			observationsPoolTargetTokens: 20,
 		});
 	});
 
 	it("falls back to derived target when explicit target is invalid for the final max", () => {
-		writeJson(join(agentDir, "settings.json"), {
-			"observational-memory": {
-				observationsPoolMaxTokens: 100,
-				observationsPoolTargetTokens: 80,
-			},
-		});
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				observationsPoolMaxTokens: 40,
-			},
-		});
+		writeJson(globalPath, { observationsPoolMaxTokens: 100, observationsPoolTargetTokens: 80 });
+		writeJson(projectPath, { observationsPoolMaxTokens: 40 });
 
-		expect(loadConfig(cwd, {})).toMatchObject({
+		expect(loadConfig(cwd, agentDir, {}).config).toMatchObject({
 			observationsPoolMaxTokens: 40,
 			observationsPoolTargetTokens: 20,
 		});
 	});
 
-	it("ignores old V2 settings without warnings or aliases", () => {
-		writeJson(join(cwd, ".pi", "settings.json"), {
-			"observational-memory": {
-				observationThresholdTokens: 10,
-				compactionThresholdTokens: 20,
-				reflectionThresholdTokens: 30,
-				compactionModel: { provider: "anthropic", id: "old" },
-				thinkingLevel: "high",
-				observerMaxTurnsPerRun: 2,
-				reflectorMaxTurnsPerPass: 3,
-				prunerMaxTurnsPerPass: 4,
-				compactionMaxToolCalls: 5,
-			},
-		});
+	it("does not read Pi's settings.json namespace", () => {
+		writeJson(join(agentDir, "settings.json"), { "observational-memory": { observeAfterTokens: 5, model: { provider: "a", id: "b" } } });
 
-		expect(loadConfig(cwd, {})).toEqual(DEFAULTS);
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+
+		expect(config).toEqual(DEFAULTS);
+		expect(warnings).toEqual([]);
 	});
 
 	it("parses passive env override", () => {
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "on" })).toEqual({ passive: true });
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "0" })).toEqual({ passive: false });
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "maybe" })).toEqual({});
-	});
-
-	describe("compactAfterTokens ratio mode", () => {
-		it("accepts compactAfterTokensMode and compactAfterTokensRatio", () => {
-			writeJson(join(cwd, ".pi", "settings.json"), {
-				"observational-memory": {
-					compactAfterTokensMode: "ratio",
-					compactAfterTokensRatio: 0.5,
-				},
-			});
-
-			expect(loadConfig(cwd, {})).toMatchObject({
-				compactAfterTokensMode: "ratio",
-				compactAfterTokensRatio: 0.5,
-			});
-		});
-
-		it("rejects invalid mode values and falls back to default calibrated", () => {
-			writeJson(join(cwd, ".pi", "settings.json"), {
-				"observational-memory": {
-					compactAfterTokensMode: "auto",
-				},
-			});
-
-			expect(loadConfig(cwd, {})).toMatchObject({ compactAfterTokensMode: "calibrated" });
-		});
-
-		it("rejects ratio outside (0, 1) and falls back to default", () => {
-			writeJson(join(cwd, ".pi", "settings.json"), {
-				"observational-memory": {
-					compactAfterTokensRatio: 0,
-				},
-			});
-			expect(loadConfig(cwd, {})).toMatchObject({ compactAfterTokensRatio: 0.68 });
-
-			writeJson(join(cwd, ".pi", "settings.json"), {
-				"observational-memory": {
-					compactAfterTokensRatio: 1,
-				},
-			});
-			expect(loadConfig(cwd, {})).toMatchObject({ compactAfterTokensRatio: 0.68 });
-
-			writeJson(join(cwd, ".pi", "settings.json"), {
-				"observational-memory": {
-					compactAfterTokensRatio: 1.5,
-				},
-			});
-			expect(loadConfig(cwd, {})).toMatchObject({ compactAfterTokensRatio: 0.68 });
-
-			writeJson(join(cwd, ".pi", "settings.json"), {
-				"observational-memory": {
-					compactAfterTokensRatio: -0.2,
-				},
-			});
-			expect(loadConfig(cwd, {})).toMatchObject({ compactAfterTokensRatio: 0.68 });
-		});
-
-		it("rejects non-numeric ratio and falls back to default", () => {
-			writeJson(join(cwd, ".pi", "settings.json"), {
-				"observational-memory": {
-					compactAfterTokensRatio: "0.5",
-				},
-			});
-			expect(loadConfig(cwd, {})).toMatchObject({ compactAfterTokensRatio: 0.68 });
-		});
-	});
-
-	describe("resolveCompactAfterTokens", () => {
-		it("returns the calibrated value in calibrated mode", () => {
-			const config = { ...DEFAULTS, compactAfterTokensMode: "calibrated", compactAfterTokens: 81000 } as any;
-			expect(resolveCompactAfterTokens(config, 1_000_000)).toBe(81000);
-		});
-
-		it("returns calibrated value regardless of context window in calibrated mode", () => {
-			const config = { ...DEFAULTS, compactAfterTokensMode: "calibrated", compactAfterTokens: 81000 } as any;
-			expect(resolveCompactAfterTokens(config, undefined)).toBe(81000);
-			expect(resolveCompactAfterTokens(config, 0)).toBe(81000);
-		});
-
-		it("scales by context window in ratio mode", () => {
-			const config = { ...DEFAULTS, compactAfterTokensMode: "ratio", compactAfterTokensRatio: 0.5, compactAfterTokens: 81000 } as any;
-			expect(resolveCompactAfterTokens(config, 1_000_000)).toBe(500_000);
-			expect(resolveCompactAfterTokens(config, 200_000)).toBe(100_000);
-		});
-
-		it("floors fractional results to an integer >= 1", () => {
-			const config = { ...DEFAULTS, compactAfterTokensMode: "ratio", compactAfterTokensRatio: 0.5, compactAfterTokens: 81000 } as any;
-			expect(resolveCompactAfterTokens(config, 3)).toBe(1);
-			expect(resolveCompactAfterTokens(config, 1)).toBe(1);
-		});
-
-		it("falls back to calibrated value when context window is unavailable in ratio mode", () => {
-			const config = { ...DEFAULTS, compactAfterTokensMode: "ratio", compactAfterTokensRatio: 0.5, compactAfterTokens: 81000 } as any;
-			expect(resolveCompactAfterTokens(config, undefined)).toBe(81000);
-			expect(resolveCompactAfterTokens(config, 0)).toBe(81000);
-			expect(resolveCompactAfterTokens(config, -1)).toBe(81000);
-		});
-	});
-	it("reads Pi's compaction.enabled, project over global", () => {
-		writeJson(join(agentDir, "settings.json"), { compaction: { enabled: false } });
-		expect(loadConfig(cwd, {}).piAutoCompactionEnabled).toBe(false);
-
-		writeJson(join(cwd, ".pi", "settings.json"), { compaction: { enabled: true } });
-		expect(loadConfig(cwd, {}).piAutoCompactionEnabled).toBe(true);
 	});
 });

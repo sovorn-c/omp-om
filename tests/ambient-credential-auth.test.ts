@@ -4,6 +4,9 @@ import { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 import { Runtime } from "../src/runtime.js";
 
+/** `ctx.models` stub whose `resolve` returns `model`, as omp's does for the configured spec. */
+const resolvesTo = (model: unknown) => ({ resolve: () => model });
+
 /**
  * Regression coverage for providers that authenticate at request time.
  *
@@ -91,7 +94,7 @@ describe("resolveModel with request-time-signed providers", () => {
 		expect(registry.hasConfiguredAuth(bedrockModel)).toBe(true);
 
 		const result = await runtime.resolveModel({
-			model: bedrockModel,
+			models: resolvesTo(bedrockModel),
 			modelRegistry: registry,
 			hasUI: false,
 		});
@@ -110,7 +113,7 @@ describe("resolveModel with request-time-signed providers", () => {
 		runtime.configLoaded = true;
 
 		const result = await runtime.resolveModel({
-			model: bedrockModel,
+			models: resolvesTo(bedrockModel),
 			modelRegistry: unauthenticatedRegistry(),
 			hasUI: false,
 		});
@@ -124,7 +127,7 @@ describe("resolveModel with request-time-signed providers", () => {
 		runtime.configLoaded = true;
 
 		const result = await runtime.resolveModel({
-			model: { provider: "openai-codex", id: "gpt-5-codex" },
+			models: resolvesTo({ provider: "openai-codex", id: "gpt-5-codex" }),
 			modelRegistry: expiredOAuthRegistry(),
 			hasUI: false,
 		});
@@ -138,7 +141,7 @@ describe("resolveModel with request-time-signed providers", () => {
 		runtime.configLoaded = true;
 
 		const result = await runtime.resolveModel({
-			model: { provider: "xai", id: "grok-4" },
+			models: resolvesTo({ provider: "xai", id: "grok-4" }),
 			modelRegistry: misconfiguredRegistry(),
 			hasUI: false,
 		});
@@ -156,7 +159,7 @@ describe("resolveModel with request-time-signed providers", () => {
 
 		for (const hasConfiguredAuth of [false, undefined]) {
 			const result = await runtime.resolveModel({
-				model: { provider: "anthropic", id: "claude" },
+				models: resolvesTo({ provider: "anthropic", id: "claude" }),
 				modelRegistry: {
 					find: () => undefined,
 					getApiKeyAndHeaders: async () => ({ ok: true }),
@@ -230,7 +233,7 @@ describe("resolveModel with a stale availability snapshot", () => {
 		runtime.configLoaded = true;
 		const { registry, recoveries } = staleSnapshotFacade({ recovers: true });
 
-		const result = await runtime.resolveModel({ model: bedrockModel, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: resolvesTo(bedrockModel), modelRegistry: registry, hasUI: false });
 
 		expect(result.ok).toBe(true);
 		expect(recoveries).toHaveLength(1);
@@ -244,7 +247,7 @@ describe("resolveModel with a stale availability snapshot", () => {
 		const calls: unknown[] = [];
 		let configured = false;
 		const result = await runtime.resolveModel({
-			model: bedrockModel,
+			models: resolvesTo(bedrockModel),
 			modelRegistry: {
 				find: () => undefined,
 				getApiKeyAndHeaders: async () => ({ ok: true }),
@@ -268,7 +271,7 @@ describe("resolveModel with a stale availability snapshot", () => {
 		runtime.configLoaded = true;
 		const { registry, recoveries } = staleSnapshotFacade({ recovers: false });
 
-		const result = await runtime.resolveModel({ model: bedrockModel, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: resolvesTo(bedrockModel), modelRegistry: registry, hasUI: false });
 
 		expect(result.ok).toBe(false);
 		expect(recoveries).toHaveLength(1);
@@ -280,7 +283,7 @@ describe("resolveModel with a stale availability snapshot", () => {
 		const { registry, recoveries } = staleSnapshotFacade({ recovers: false });
 
 		for (let i = 0; i < 3; i++) {
-			await runtime.resolveModel({ model: bedrockModel, modelRegistry: registry, hasUI: false });
+			await runtime.resolveModel({ models: resolvesTo(bedrockModel), modelRegistry: registry, hasUI: false });
 		}
 
 		expect(recoveries).toHaveLength(1);
@@ -292,7 +295,7 @@ describe("resolveModel with a stale availability snapshot", () => {
 		const { registry, recoveries } = staleSnapshotFacade({ recovers: true });
 		registry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "sk-live" });
 
-		const result = await runtime.resolveModel({ model: bedrockModel, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: resolvesTo(bedrockModel), modelRegistry: registry, hasUI: false });
 
 		expect(result.ok).toBe(true);
 		expect(recoveries).toHaveLength(0);
@@ -304,7 +307,7 @@ describe("resolveModel with a stale availability snapshot", () => {
 		const { registry, recoveries } = staleSnapshotFacade({ recovers: true });
 		registry.isUsingOAuth = () => true;
 
-		const result = await runtime.resolveModel({ model: bedrockModel, modelRegistry: registry, hasUI: false });
+		const result = await runtime.resolveModel({ models: resolvesTo(bedrockModel), modelRegistry: registry, hasUI: false });
 
 		expect(result.ok).toBe(false);
 		expect(recoveries).toHaveLength(0);
@@ -321,7 +324,7 @@ describe("resolveModel with a stale availability snapshot", () => {
 			isUsingOAuth: () => false,
 		};
 		await expect(
-			runtime.resolveModel({ model: bedrockModel, modelRegistry: noRefresh, hasUI: false }),
+			runtime.resolveModel({ models: resolvesTo(bedrockModel), modelRegistry: noRefresh, hasUI: false }),
 		).resolves.toMatchObject({ ok: false });
 
 		const throwing = {
@@ -331,7 +334,7 @@ describe("resolveModel with a stale availability snapshot", () => {
 			},
 		};
 		await expect(
-			runtime.resolveModel({ model: bedrockModel, modelRegistry: throwing, hasUI: false }),
+			runtime.resolveModel({ models: resolvesTo(bedrockModel), modelRegistry: throwing, hasUI: false }),
 		).resolves.toMatchObject({ ok: false });
 	});
 });

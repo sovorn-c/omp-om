@@ -1,34 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-
-export interface ConfiguredModel {
-	provider: string;
-	id: string;
-	thinking?: ModelThinkingLevel;
-}
-
-/**
- * How `compactAfterTokens` is interpreted.
- *
- * - `"calibrated"` (default): use the static `compactAfterTokens` value directly.
- *   Backwards-compatible with all existing V3 configs.
- *
- * - `"ratio"`: compute the effective threshold as
- *   `floor(model.contextWindow * compactAfterTokensRatio)`. This auto-scales the
- *   proactive compaction trigger to the active model's context window, so a 1M
- *   context model is not preempted at the same 81K threshold as a 128K model.
- *
- *   Some models advertise a large context window but lose attention at long
- *   range; users can lower `compactAfterTokensRatio` to compact earlier on such
- *   models without giving up the window on models that stay sharp.
- *
- *   When the active model's `contextWindow` is unavailable (undefined, 0, or
- *   negative), ratio mode falls back to the calibrated `compactAfterTokens`
- *   value so compaction still triggers safely.
- */
-export type CompactAfterTokensMode = "calibrated" | "ratio";
 
 export interface Config {
 	observeAfterTokens: number;
@@ -39,9 +10,13 @@ export interface Config {
 	 * window; see {@link resolveObserverChunkMaxTokens}.
 	 */
 	observerChunkMaxTokens?: number;
-	compactAfterTokens: number;
-	compactAfterTokensMode: CompactAfterTokensMode;
-	compactAfterTokensRatio: number;
+	/**
+	 * Memory model for observer, reflector, and dropper: any spec accepted by
+	 * omp's `ctx.models.resolve` (`provider/id`, a bare id, or a role alias such
+	 * as `@smol`). The one model for every worker; there are no per-worker
+	 * overrides.
+	 */
+	model: string;
 	/**
 	 * Maximum estimated source tokens the compaction hook may keep in context
 	 * when it moves Pi's retention boundary back to the observer frontier so
@@ -80,79 +55,27 @@ export interface Config {
 	 * main session and the default 32K response budget can overflow the slot.
 	 */
 	agentMaxTokens: number;
-	model?: ConfiguredModel;
-	/**
-	 * Run memory workers (observer, reflector, dropper) only while the agent is
-	 * idle: launch them from `agent_settled` instead of `agent_start`/`turn_end`,
-	 * and abort an in-flight run when a new agent run starts. For hosts where
-	 * the session model and the memory model share one context budget (a single
-	 * local llama.cpp server), this keeps worker requests from colliding with
-	 * the session's own requests.
-	 */
-	consolidateWhenIdle: boolean;
-	/**
-	 * Optional model the memory workers fall back to.
-	 *
-	 * Tried in two places:
-	 * - Resolution: when the primary memory model (this `model` when set,
-	 *   otherwise the session model) cannot be resolved — absent from Pi's
-	 *   registry, or carrying no usable credentials.
-	 * - Runtime: when a worker stage (observer/reflector/dropper) fails its
-	 *   model call, that one stage is retried once with this model.
-	 *
-	 * Once the fallback resolves, it is reused for the rest of the consolidation
-	 * pass so later stages do not re-pay a known-broken primary. A configured
-	 * fallback that also fails leaves the existing skip/fail-safe behavior intact.
-	 */
-	fallbackModel?: ConfiguredModel;
 	showWorkerNotifications: boolean;
 	passive: boolean;
 	debugLog: boolean;
-	/**
-	 * Pi's own `compaction.enabled` setting, read from the same settings files
-	 * (not an extension setting). When Pi's automatic compaction is disabled,
-	 * the proactive trigger counts raw source tokens instead of observed ones,
-	 * since nothing else would compact a session whose observer has stalled.
-	 */
-	piAutoCompactionEnabled: boolean;
 }
 
 export const DEFAULTS: Config = {
 	observeAfterTokens: 10_000,
 	reflectAfterTokens: 20_000,
-	compactAfterTokens: 81_000,
-	compactAfterTokensMode: "calibrated",
-	compactAfterTokensRatio: 0.68,
 	observationsPoolMaxTokens: 20_000,
 	observationsPoolTargetTokens: 10_000,
 	agentMaxTurns: 16,
 	agentMaxTokens: 32_000,
 	compactionCatchUpMaxChunks: 2,
-	consolidateWhenIdle: false,
+	model: "@smol",
 	showWorkerNotifications: true,
 	passive: false,
 	debugLog: false,
-	piAutoCompactionEnabled: true,
 };
 
-export const COMPACT_AFTER_TOKENS_MODE_VALUES: readonly CompactAfterTokensMode[] = ["calibrated", "ratio"] as const;
-
-/**
- * Resolve the effective proactive-compaction token threshold for the given
- * config and active model context window.
- *
- * In `"calibrated"` mode this is always `config.compactAfterTokens`.
- *
- * In `"ratio"` mode this is `floor(contextWindow * compactAfterTokensRatio)`
- * (clamped to a minimum of 1) when `contextWindow` is a positive number, and
- * falls back to `config.compactAfterTokens` otherwise.
- */
-export function resolveCompactAfterTokens(config: Config, contextWindow: number | undefined): number {
-	if (config.compactAfterTokensMode === "ratio" && typeof contextWindow === "number" && contextWindow > 0) {
-		return Math.max(1, Math.floor(contextWindow * config.compactAfterTokensRatio));
-	}
-	return config.compactAfterTokens;
-}
+/** Thinking level for every memory worker call; the one `model` key carries no per-model setting. */
+export const WORKER_THINKING_LEVEL = "low";
 
 /** Retained-tail budget used when `compactionMaxRetainedTokens` is unset and the context window is unknown. */
 export const COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 60_000;
@@ -228,8 +151,6 @@ export function resolveWorkerMemoryMaxTokens(config: Config, contextWindow: numb
 	return WORKER_MEMORY_FALLBACK_MAX_TOKENS;
 }
 
-export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-
 /** Observer chunk cap used when no config is set and the model's context window is unknown. */
 export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 60_000;
 
@@ -272,8 +193,17 @@ export function resolveObserverChunkMaxTokens(config: Config, contextWindow: num
 	return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
 }
 
-const SETTINGS_KEY = "observational-memory";
+const CONFIG_FILE = "omp-om.json";
 const PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
+
+/** Keys earlier versions accepted that no longer do. They are ignored with a warning. */
+const REMOVED_KEYS = [
+	"compactAfterTokens",
+	"compactAfterTokensMode",
+	"compactAfterTokensRatio",
+	"consolidateWhenIdle",
+	"fallbackModel",
+] as const;
 
 function positiveIntegerOrUndefined(value: unknown): number | undefined {
 	return Number.isInteger(value) && typeof value === "number" && value > 0 ? value : undefined;
@@ -288,23 +218,6 @@ function derivedObservationPoolTarget(maxTokens: number): number {
 	return Math.floor(maxTokens / 2);
 }
 
-function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
-	return typeof value === "string" && (THINKING_LEVEL_VALUES as readonly string[]).includes(value);
-}
-
-function isCompactAfterTokensMode(value: unknown): value is CompactAfterTokensMode {
-	return typeof value === "string" && (COMPACT_AFTER_TOKENS_MODE_VALUES as readonly string[]).includes(value);
-}
-
-/**
- * A valid ratio is a finite number strictly between 0 and 1.
- * 0 would never trigger; >= 1 would compact at/after the full window with no
- * room left for the response.
- */
-function validRatioOrUndefined(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1 ? value : undefined;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -313,23 +226,12 @@ function nonEmptyString(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function normalizeModel(value: unknown): ConfiguredModel | undefined {
-	if (!isRecord(value)) return undefined;
-	const provider = nonEmptyString(value.provider);
-	const id = nonEmptyString(value.id);
-	if (!provider || !id) return undefined;
-	const model: ConfiguredModel = { provider, id };
-	if (isThinkingLevel(value.thinking)) model.thinking = value.thinking;
-	return model;
-}
-
-function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config> {
+function normalizeSettingsConfig(path: string, value: Record<string, unknown>, warnings: string[]): Partial<Config> {
 	const normalized: Partial<Config> = {};
 	const numberKeys = [
 		"observeAfterTokens",
 		"reflectAfterTokens",
 		"observerChunkMaxTokens",
-		"compactAfterTokens",
 		"compactionMaxRetainedTokens",
 		"compactionSummaryMaxTokens",
 		"workerMemoryMaxTokens",
@@ -345,19 +247,17 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	if (Number.isInteger(value.compactionCatchUpMaxChunks) && (value.compactionCatchUpMaxChunks as number) >= 0) {
 		normalized.compactionCatchUpMaxChunks = value.compactionCatchUpMaxChunks as number;
 	}
-	if (isCompactAfterTokensMode(value.compactAfterTokensMode)) {
-		normalized.compactAfterTokensMode = value.compactAfterTokensMode;
-	}
-	const ratio = validRatioOrUndefined(value.compactAfterTokensRatio);
-	if (ratio !== undefined) normalized.compactAfterTokensRatio = ratio;
-	if (typeof value.consolidateWhenIdle === "boolean") normalized.consolidateWhenIdle = value.consolidateWhenIdle;
 	if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;
 	if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
-	const model = normalizeModel(value.model);
-	if (model) normalized.model = model;
-	const fallbackModel = normalizeModel(value.fallbackModel);
-	if (fallbackModel) normalized.fallbackModel = fallbackModel;
+	if (value.model !== undefined) {
+		const model = nonEmptyString(value.model);
+		if (model) normalized.model = model;
+		else warnings.push(`${path}: "model" must be a non-empty string such as "@smol" or "provider/id"; ignored`);
+	}
+	for (const key of REMOVED_KEYS) {
+		if (key in value) warnings.push(`${path}: "${key}" is no longer supported; ignored`);
+	}
 	return normalized;
 }
 
@@ -370,34 +270,35 @@ export function readEnvConfig(env: NodeJS.ProcessEnv = process.env): Partial<Con
 	return {};
 }
 
-/** Pi's `compaction.enabled` from one settings file, if present and boolean. */
-function readPiCompactionEnabled(path: string): boolean | undefined {
-	if (!existsSync(path)) return undefined;
-	try {
-		const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
-		const compaction = raw.compaction;
-		return isRecord(compaction) && typeof compaction.enabled === "boolean" ? compaction.enabled : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function readNamespacedConfig(path: string): Partial<Config> {
+function readConfigFile(path: string, warnings: string[]): Partial<Config> {
 	if (!existsSync(path)) return {};
+	let raw: unknown;
 	try {
-		const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
-		const nested = raw[SETTINGS_KEY];
-		return isRecord(nested) ? normalizeSettingsConfig(nested) : {};
-	} catch {
+		raw = JSON.parse(readFileSync(path, "utf-8"));
+	} catch (error) {
+		warnings.push(`${path}: ${error instanceof Error ? error.message : String(error)}; using defaults for this file`);
 		return {};
 	}
+	if (!isRecord(raw) || Array.isArray(raw)) {
+		warnings.push(`${path}: expected a JSON object; using defaults for this file`);
+		return {};
+	}
+	return normalizeSettingsConfig(path, raw, warnings);
 }
 
-export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): Config {
-	const globalPath = join(getAgentDir(), "settings.json");
-	const projectPath = join(cwd, ".pi", "settings.json");
-	const globalConfig = readNamespacedConfig(globalPath);
-	const projectConfig = readNamespacedConfig(projectPath);
+/**
+ * Load `<agentDir>/omp-om.json`, then merge `<cwd>/.omp/omp-om.json` and the
+ * passive env override over it. Problems never throw: a bad file contributes
+ * nothing and adds one warning for the caller to surface.
+ */
+export function loadConfig(
+	cwd: string,
+	agentDir: string,
+	env: NodeJS.ProcessEnv = process.env,
+): { config: Config; warnings: string[] } {
+	const warnings: string[] = [];
+	const globalConfig = readConfigFile(join(agentDir, CONFIG_FILE), warnings);
+	const projectConfig = readConfigFile(join(cwd, ".omp", CONFIG_FILE), warnings);
 	const envConfig = readEnvConfig(env);
 	const merged = {
 		...DEFAULTS,
@@ -411,13 +312,5 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): C
 		merged.observationsPoolMaxTokens,
 	) ?? derivedObservationPoolTarget(merged.observationsPoolMaxTokens);
 
-	const piAutoCompactionEnabled = readPiCompactionEnabled(projectPath)
-		?? readPiCompactionEnabled(globalPath)
-		?? DEFAULTS.piAutoCompactionEnabled;
-
-	return {
-		...merged,
-		observationsPoolTargetTokens: target,
-		piAutoCompactionEnabled,
-	};
+	return { config: { ...merged, observationsPoolTargetTokens: target }, warnings };
 }

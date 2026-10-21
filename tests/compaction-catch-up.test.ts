@@ -81,7 +81,7 @@ function setup(args: {
 			agentMaxTurns: 4,
 			agentMaxTokens: 8192,
 			showWorkerNotifications: true,
-			model: { provider: "gtr7", id: "memory", thinking: "off" },
+			model: "@smol",
 		},
 		compactHookInFlight: false,
 		consolidationInFlight: args.consolidationInFlight ?? false,
@@ -97,6 +97,7 @@ function setup(args: {
 		hasUI: true,
 		ui: { notify: vi.fn() },
 		model: { contextWindow: 65536 },
+		models: { resolve: vi.fn() },
 		modelRegistry: {},
 		sessionManager: { getBranch: vi.fn(() => entries) },
 	};
@@ -127,7 +128,7 @@ describe("compaction hook synchronous catch-up", () => {
 		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
 			allowedSourceEntryIds: ["t1", "a2"],
 			maxOutputTokens: 8192,
-			thinkingLevel: "off",
+			thinkingLevel: "low",
 		}));
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [gapObs], coversUpToId: "a2" });
 		expect(result.compaction.firstKeptEntryId).toBe("u2");

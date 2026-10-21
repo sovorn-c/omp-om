@@ -45,7 +45,7 @@ describe("resolveModel debug diagnostics", () => {
 		const runtime = new Runtime();
 		runtime.configLoaded = true;
 		return withDebugLogContext({ enabled: true }, () =>
-			runtime.resolveModel({ model, modelRegistry: registry as any, hasUI: false }),
+			runtime.resolveModel({ models: { resolve: () => model }, modelRegistry: registry as any, hasUI: false }),
 		);
 	}
 

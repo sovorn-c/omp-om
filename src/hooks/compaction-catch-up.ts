@@ -1,9 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { runObserver } from "../agents/observer/agent.js";
-import { resolveObserverChunkMaxTokens, resolveWorkerMemoryMaxTokens } from "../config.js";
+import { WORKER_THINKING_LEVEL, resolveObserverChunkMaxTokens, resolveWorkerMemoryMaxTokens } from "../config.js";
 import { debugLog } from "../debug-log.js";
-import type { Runtime } from "../runtime.js";
+import type { OmpExtensionContext, Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVATIONS_RECORDED,
@@ -28,7 +28,7 @@ export type CatchUpResult = {
 export type CatchUpArgs = {
 	pi: ExtensionAPI;
 	runtime: Runtime;
-	ctx: ExtensionContext;
+	ctx: OmpExtensionContext;
 	entries: Entry[];
 	gap: UnobservedSourceSpan;
 	maxChunks: number;
@@ -51,7 +51,7 @@ export async function catchUpObserver(args: CatchUpArgs): Promise<CatchUpResult>
 	if (maxChunks <= 0) return result;
 
 	const resolved = await runtime.resolveModel({
-		model: ctx.model,
+		models: ctx.models,
 		modelRegistry: ctx.modelRegistry,
 		hasUI: ctx.hasUI,
 		ui: ctx.ui,
@@ -103,7 +103,7 @@ export async function catchUpObserver(args: CatchUpArgs): Promise<CatchUpResult>
 				signal,
 				maxTurns: runtime.config.agentMaxTurns,
 				maxOutputTokens: runtime.config.agentMaxTokens,
-				thinkingLevel: runtime.config.model?.thinking ?? "low",
+				thinkingLevel: WORKER_THINKING_LEVEL,
 				modelRegistry: ctx.modelRegistry as any,
 			});
 		} catch (error) {
