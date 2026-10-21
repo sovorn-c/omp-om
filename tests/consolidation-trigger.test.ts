@@ -86,7 +86,6 @@ function setup(args: {
 			model: "@smol",
 		},
 		consolidationInFlight: args.consolidationInFlight ?? false,
-		consolidationAbortController: undefined as AbortController | undefined,
 		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
 		resolveFailureNotified: false,
 		lastObserverError: undefined as string | undefined,
@@ -96,7 +95,6 @@ function setup(args: {
 		resolveModel: vi.fn(async () => ({ ok: true, model: { reasoning: true }, apiKey: "key", headers: { h: "v" } })),
 		launchConsolidationTask: vi.fn((_ctx, work) => {
 			runtime.consolidationInFlight = true;
-			runtime.consolidationAbortController = new AbortController();
 			launchedWork = work;
 			// Resolve when the test drives the work via runLaunchedWork().
 			return new Promise<void>((resolve) => {

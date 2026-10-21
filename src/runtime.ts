@@ -124,8 +124,6 @@ export class Runtime {
 	consolidationInFlight = false;
 	consolidationPromise: Promise<void> | null = null;
 	consolidationPhase: ConsolidationPhase | undefined;
-	/** Aborts the in-flight consolidation run's model calls. */
-	consolidationAbortController: AbortController | undefined;
 	compactHookInFlight = false;
 	resolveFailureNotified = false;
 	lastObserverError: string | undefined;
@@ -327,12 +325,9 @@ export class Runtime {
 		this.lastObserverError = undefined;
 		this.lastReflectorError = undefined;
 		this.lastDropperError = undefined;
-		const controller = new AbortController();
-		this.consolidationAbortController = controller;
 		const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
 			this.consolidationInFlight = false;
 			this.consolidationPhase = undefined;
-			if (this.consolidationAbortController === controller) this.consolidationAbortController = undefined;
 			if (this.consolidationPromise === promise) this.consolidationPromise = null;
 		});
 		this.consolidationPromise = promise;

@@ -246,14 +246,6 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 	}));
 }
 
-function consolidationSignal(runtime: Runtime): AbortSignal | undefined {
-	return runtime.consolidationAbortController?.signal;
-}
-
-function wasAborted(runtime: Runtime): boolean {
-	return consolidationSignal(runtime)?.aborted === true;
-}
-
 export async function runConsolidationPipeline(
 	pi: ExtensionAPI,
 	runtime: Runtime,
@@ -266,11 +258,9 @@ export async function runConsolidationPipeline(
 		const observerOutcome = await runObserverStage(pi, runtime, ctx, resolver);
 		if (observerOutcome === "abort") return;
 	} catch (error) {
-		if (wasAborted(runtime)) return;
 		debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
 		return;
 	}
-	if (wasAborted(runtime)) return;
 
 	runtime.consolidationPhase = "reflector";
 	let reflectorResult: ReflectorStageResult;
@@ -278,17 +268,14 @@ export async function runConsolidationPipeline(
 		reflectorResult = await runReflectorStage(pi, runtime, ctx, resolver);
 		if (reflectorResult.outcome === "abort") return;
 	} catch (error) {
-		if (wasAborted(runtime)) return;
 		debugLog("reflector.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "reflector", error) });
 		return;
 	}
-	if (wasAborted(runtime)) return;
 
 	runtime.consolidationPhase = "dropper";
 	try {
 		await runDropperStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
 	} catch (error) {
-		if (wasAborted(runtime)) return;
 		debugLog("dropper.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "dropper", error) });
 	}
 }
@@ -329,10 +316,6 @@ async function runObserverStage(
 	// derives from the resolved model's context window.
 	const resolved = await resolver.resolve("observer");
 	if (!resolved) return "abort";
-	if (wasAborted(runtime)) {
-		debugLog("observer.aborted", {});
-		return "abort";
-	}
 
 	const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
 	const backlogEntries = sourceEntriesAfter(entries, lastCoverageIdx);
@@ -398,14 +381,9 @@ async function runObserverStage(
 			allowedSourceEntryIds: sourceEntryIds,
 			maxTurns: runtime.config.agentMaxTurns,
 			maxOutputTokens: runtime.config.agentMaxTokens,
-			signal: consolidationSignal(runtime),
 			thinkingLevel: WORKER_THINKING_LEVEL,
 		});
 	} catch (error) {
-		if (wasAborted(runtime)) {
-			debugLog("observer.aborted", { coversUpToId });
-			return "abort";
-		}
 		if (error instanceof ObserverStreamError) {
 			// API/stream failure is not a clean empty (#32): surface it as a real
 			// failure instead of the "no observations" path. Coverage stays put.
@@ -413,10 +391,6 @@ async function runObserverStage(
 			return "abort";
 		}
 		throw error;
-	}
-	if (wasAborted(runtime)) {
-		debugLog("observer.aborted", { coversUpToId });
-		return "abort";
 	}
 	if (!observations || observations.length === 0) {
 		// Deliberate empty: routine info, not a warning, and back off re-fires
@@ -466,10 +440,6 @@ async function runReflectorStage(
 	);
 	const resolved = await resolver.resolve("reflector");
 	if (!resolved) return { outcome: "abort", sameRunReflections: [] };
-	if (wasAborted(runtime)) {
-		debugLog("reflector.aborted", {});
-		return { outcome: "abort", sameRunReflections: [] };
-	}
 
 	const folded = foldLedger(entries);
 	const reflectorMemory = boundWorkerMemory(
@@ -486,13 +456,8 @@ async function runReflectorStage(
 		observations: reflectorMemory.observations,
 		maxTurns: runtime.config.agentMaxTurns,
 		maxOutputTokens: runtime.config.agentMaxTokens,
-		signal: consolidationSignal(runtime),
 		thinkingLevel: WORKER_THINKING_LEVEL,
 	});
-	if (wasAborted(runtime)) {
-		debugLog("reflector.aborted", {});
-		return { outcome: "abort", sameRunReflections: [] };
-	}
 	if (!reflections) return { outcome: "continue", sameRunReflections: [] };
 
 	const data = buildReflectionsRecordedData(reflections, observationCoverageId);
@@ -554,10 +519,6 @@ async function runDropperStage(
 	);
 	const resolved = await resolver.resolve("dropper");
 	if (!resolved) return "abort";
-	if (wasAborted(runtime)) {
-		debugLog("dropper.aborted", {});
-		return "abort";
-	}
 
 	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
 	// The dropper prunes old observations, so it sees the oldest ones that fit.
@@ -577,13 +538,8 @@ async function runDropperStage(
 		targetTokens: runtime.config.observationsPoolTargetTokens,
 		maxTurns: runtime.config.agentMaxTurns,
 		maxOutputTokens: runtime.config.agentMaxTokens,
-		signal: consolidationSignal(runtime),
 		thinkingLevel: WORKER_THINKING_LEVEL,
 	});
-	if (wasAborted(runtime)) {
-		debugLog("dropper.aborted", {});
-		return "abort";
-	}
 	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
 	const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
 	debugLog("dropper.append", {

@@ -2921,12 +2921,6 @@ function maybeLaunchConsolidation(pi, runtime, ctx) {
     await runConsolidationPipeline(pi, runtime, consolidationCtx);
   }));
 }
-function consolidationSignal(runtime) {
-  return runtime.consolidationAbortController?.signal;
-}
-function wasAborted(runtime) {
-  return consolidationSignal(runtime)?.aborted === true;
-}
 async function runConsolidationPipeline(pi, runtime, ctx) {
   const resolver = makeModelResolver(runtime, ctx);
   runtime.consolidationPhase = "observer";
@@ -2934,27 +2928,22 @@ async function runConsolidationPipeline(pi, runtime, ctx) {
     const observerOutcome = await runObserverStage(pi, runtime, ctx, resolver);
     if (observerOutcome === "abort") return;
   } catch (error) {
-    if (wasAborted(runtime)) return;
     debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
     return;
   }
-  if (wasAborted(runtime)) return;
   runtime.consolidationPhase = "reflector";
   let reflectorResult;
   try {
     reflectorResult = await runReflectorStage(pi, runtime, ctx, resolver);
     if (reflectorResult.outcome === "abort") return;
   } catch (error) {
-    if (wasAborted(runtime)) return;
     debugLog("reflector.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "reflector", error) });
     return;
   }
-  if (wasAborted(runtime)) return;
   runtime.consolidationPhase = "dropper";
   try {
     await runDropperStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
   } catch (error) {
-    if (wasAborted(runtime)) return;
     debugLog("dropper.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "dropper", error) });
   }
 }
@@ -2976,10 +2965,6 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
   }
   const resolved = await resolver.resolve("observer");
   if (!resolved) return "abort";
-  if (wasAborted(runtime)) {
-    debugLog("observer.aborted", {});
-    return "abort";
-  }
   const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
   const backlogEntries = sourceEntriesAfter(entries, lastCoverageIdx);
   const contextWindow = modelContextWindow(resolved);
@@ -3035,23 +3020,14 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
       allowedSourceEntryIds: sourceEntryIds,
       maxTurns: runtime.config.agentMaxTurns,
       maxOutputTokens: runtime.config.agentMaxTokens,
-      signal: consolidationSignal(runtime),
       thinkingLevel: WORKER_THINKING_LEVEL
     });
   } catch (error) {
-    if (wasAborted(runtime)) {
-      debugLog("observer.aborted", { coversUpToId });
-      return "abort";
-    }
     if (error instanceof ObserverStreamError) {
       runtime.recordConsolidationStageError(ctx, "observer", error);
       return "abort";
     }
     throw error;
-  }
-  if (wasAborted(runtime)) {
-    debugLog("observer.aborted", { coversUpToId });
-    return "abort";
   }
   if (!observations || observations.length === 0) {
     debugLog("observer.empty", { coversUpToId });
@@ -3090,10 +3066,6 @@ async function runReflectorStage(pi, runtime, ctx, resolver) {
   );
   const resolved = await resolver.resolve("reflector");
   if (!resolved) return { outcome: "abort", sameRunReflections: [] };
-  if (wasAborted(runtime)) {
-    debugLog("reflector.aborted", {});
-    return { outcome: "abort", sameRunReflections: [] };
-  }
   const folded = foldLedger(entries);
   const reflectorMemory = boundWorkerMemory(
     folded.reflections,
@@ -3109,13 +3081,8 @@ async function runReflectorStage(pi, runtime, ctx, resolver) {
     observations: reflectorMemory.observations,
     maxTurns: runtime.config.agentMaxTurns,
     maxOutputTokens: runtime.config.agentMaxTokens,
-    signal: consolidationSignal(runtime),
     thinkingLevel: WORKER_THINKING_LEVEL
   });
-  if (wasAborted(runtime)) {
-    debugLog("reflector.aborted", {});
-    return { outcome: "abort", sameRunReflections: [] };
-  }
   if (!reflections) return { outcome: "continue", sameRunReflections: [] };
   const data = buildReflectionsRecordedData(reflections, observationCoverageId);
   if (!data) return { outcome: "continue", sameRunReflections: [] };
@@ -3165,10 +3132,6 @@ async function runDropperStage(pi, runtime, ctx, resolver, sameRunReflections, s
   );
   const resolved = await resolver.resolve("dropper");
   if (!resolved) return "abort";
-  if (wasAborted(runtime)) {
-    debugLog("dropper.aborted", {});
-    return "abort";
-  }
   const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
   const dropperMemory = boundWorkerMemory(
     reflectionsForDropper,
@@ -3186,13 +3149,8 @@ async function runDropperStage(pi, runtime, ctx, resolver, sameRunReflections, s
     targetTokens: runtime.config.observationsPoolTargetTokens,
     maxTurns: runtime.config.agentMaxTurns,
     maxOutputTokens: runtime.config.agentMaxTokens,
-    signal: consolidationSignal(runtime),
     thinkingLevel: WORKER_THINKING_LEVEL
   });
-  if (wasAborted(runtime)) {
-    debugLog("dropper.aborted", {});
-    return "abort";
-  }
   const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
   const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : void 0;
   debugLog("dropper.append", {
@@ -3240,8 +3198,6 @@ var Runtime = class {
   consolidationInFlight = false;
   consolidationPromise = null;
   consolidationPhase;
-  /** Aborts the in-flight consolidation run's model calls. */
-  consolidationAbortController;
   compactHookInFlight = false;
   resolveFailureNotified = false;
   lastObserverError;
@@ -3376,12 +3332,9 @@ var Runtime = class {
     this.lastObserverError = void 0;
     this.lastReflectorError = void 0;
     this.lastDropperError = void 0;
-    const controller = new AbortController();
-    this.consolidationAbortController = controller;
     const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
       this.consolidationInFlight = false;
       this.consolidationPhase = void 0;
-      if (this.consolidationAbortController === controller) this.consolidationAbortController = void 0;
       if (this.consolidationPromise === promise) this.consolidationPromise = null;
     });
     this.consolidationPromise = promise;
