@@ -9,6 +9,7 @@ import {
 	oldV2ObservationEntry,
 	reflection,
 	reflectionsRecordedEntry,
+	resetBoundary,
 	textCustomMessage,
 } from "./fixtures/session.js";
 
@@ -113,5 +114,21 @@ describe("session-ledger V3 folding", () => {
 
 		expect(foldLedger(mainBranch).observations.map((obs) => obs.id)).toEqual(["aaaa00000000"]);
 		expect(foldLedger(forkBranch).observations.map((obs) => obs.id)).toEqual(["bbbb00000000"]);
+	});
+
+	it("ignores ledger entries at or before the latest reset_boundary", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-1", { observations: [observation("aaaaaaaaaaaa")], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-r1", { reflections: [reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"])], coversUpToId: "raw-1" }),
+			resetBoundary("rb-1"),
+			textCustomMessage("raw-2", "bbbb"),
+			observationsRecordedEntry("om-2", { observations: [observation("bbbbbbbbbbbb")], coversUpToId: "raw-2" }),
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(folded.reflections).toEqual([]);
 	});
 });

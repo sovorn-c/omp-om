@@ -70,7 +70,8 @@ export async function catchUpObserver(args: CatchUpArgs): Promise<CatchUpResult>
 	// at the retained-range start). A coverage marker claims everything before
 	// it, so starting later would mark unread source between the frontier and
 	// the range start as observed and the background observer would never
-	// revisit it.
+	// revisit it. The frontier never falls below the latest reset_boundary,
+	// so source from before a `/clear` is never read.
 	const frontierIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
 	let remaining = entries.slice(frontierIndex + 1, gap.lastIndex + 1).filter(isSourceEntry);
 	let branch = entries;

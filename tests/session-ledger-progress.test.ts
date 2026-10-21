@@ -11,6 +11,10 @@ import {
 	rawTokensSinceLastCompaction,
 	rawTokensSinceObservationCoverage,
 	rawTokensSinceReflectionCoverage,
+	observedTokensSinceLastCompaction,
+	resetBoundaryIndex,
+	unobservedSourceSpanBefore,
+	realTokensSinceAnchor,
 } from "../src/session-ledger/index.js";
 import {
 	V3_OBSERVATIONS_DROPPED,
@@ -24,8 +28,16 @@ import {
 	oldV2ObservationEntry,
 	reflection,
 	reflectionsRecordedEntry,
+	resetBoundary,
+	rawMessage,
 	textCustomMessage,
 } from "./fixtures/session.js";
+
+function rawAssistantWithUsage(id: string, totalTokens: number) {
+	return rawMessage(id, "reply", {
+		message: { role: "assistant", content: [{ type: "text", text: "reply" }], stopReason: "end_turn", usage: { totalTokens } },
+	});
+}
 
 describe("session-ledger V3 progress helpers", () => {
 	it("detects only raw/source entries as source entries", () => {
@@ -139,5 +151,95 @@ describe("session-ledger V3 progress helpers", () => {
 		];
 
 		expect(rawTokensSinceLastCompaction(entries)).toBe(3); // raw-1 + raw-2 from live tail starting at firstKeptEntryId
+	});
+
+	describe("reset_boundary floor", () => {
+		it("resetBoundaryIndex is the latest reset_boundary index, else -1", () => {
+			expect(resetBoundaryIndex([textCustomMessage("raw-1", "aaaa")])).toBe(-1);
+			expect(
+				resetBoundaryIndex([
+					textCustomMessage("raw-1", "aaaa"),
+					resetBoundary("rb-1"),
+					textCustomMessage("raw-2", "bbbb"),
+					resetBoundary("rb-2"),
+					textCustomMessage("raw-3", "cccc"),
+				]),
+			).toBe(3);
+		});
+
+		it("source entries before reset_boundary are not counted as unobserved", () => {
+			const entries = [
+				textCustomMessage("raw-1", "aaaaaaaa"),
+				textCustomMessage("raw-2", "bbbbbbbb"),
+				resetBoundary("rb-1"),
+				textCustomMessage("raw-3", "cccc"),
+				textCustomMessage("raw-4", "dddd"),
+			];
+
+			expect(rawTokensSinceObservationCoverage(entries)).toBe(2);
+			expect(rawTokensAfterIndex(entries, -1)).toBe(2);
+			expect(unobservedSourceSpanBefore(entries, 5)).toEqual({ firstIndex: 3, lastIndex: 4, entryCount: 2, tokens: 2 });
+			expect(unobservedSourceSpanBefore(entries, 3)).toBeUndefined();
+		});
+
+		it("coverage markers at or before the boundary do not count; the boundary is the coverage floor", () => {
+			const entries = [
+				textCustomMessage("raw-1", "aaaa"),
+				observationsRecordedEntry("om-1", { observations: [observation("aaaaaaaaaaaa")], coversUpToId: "raw-1" }),
+				resetBoundary("rb-1"),
+				textCustomMessage("raw-2", "bbbb"),
+			];
+
+			expect(latestCoverageIndex(entries, V3_OBSERVATIONS_RECORDED)).toBe(2);
+			expect(latestCoverageMarkerId(entries, V3_OBSERVATIONS_RECORDED)).toBeUndefined();
+		});
+
+		it("coverage after the boundary advances normally", () => {
+			const entries = [
+				textCustomMessage("raw-1", "aaaa"),
+				resetBoundary("rb-1"),
+				textCustomMessage("raw-2", "bbbb"),
+				observationsRecordedEntry("om-2", { observations: [observation("bbbbbbbbbbbb")], coversUpToId: "raw-2" }),
+				textCustomMessage("raw-3", "cccc"),
+			];
+
+			expect(latestCoverageIndex(entries, V3_OBSERVATIONS_RECORDED)).toBe(2);
+			expect(latestCoverageMarkerId(entries, V3_OBSERVATIONS_RECORDED)).toBe("raw-2");
+			expect(rawTokensSinceObservationCoverage(entries)).toBe(1);
+		});
+
+		it("compaction range starts after the boundary, ignoring a compaction from before it", () => {
+			const entries = [
+				textCustomMessage("raw-1", "aaaa"),
+				compactionEntry("cmp-1", { firstKeptEntryId: "raw-1" }),
+				resetBoundary("rb-1"),
+				textCustomMessage("raw-2", "bbbb"),
+			];
+
+			expect(rawTokensSinceLastCompaction(entries)).toBe(1);
+			expect(observedTokensSinceLastCompaction(entries)).toBe(0);
+		});
+
+		it("measures real context growth from the boundary, not from usage before it", () => {
+			const entries = [
+				rawAssistantWithUsage("a-1", 9000),
+				resetBoundary("rb-1"),
+				textCustomMessage("raw-2", "bbbb"),
+			];
+
+			expect(realTokensSinceAnchor(entries, V3_OBSERVATIONS_RECORDED, 500)).toBe(500);
+			expect(realTokensSinceAnchor(entries, undefined, 500)).toBe(500);
+		});
+
+		it("does not look past the boundary for a coverage usage baseline", () => {
+			const entries = [
+				rawAssistantWithUsage("a-1", 100),
+				resetBoundary("rb-1"),
+				textCustomMessage("raw-2", "bbbb"),
+				observationsRecordedEntry("om-2", { observations: [observation("bbbbbbbbbbbb")], coversUpToId: "raw-2" }),
+			];
+
+			expect(realTokensSinceAnchor(entries, V3_OBSERVATIONS_RECORDED, 500)).toBeUndefined();
+		});
 	});
 });

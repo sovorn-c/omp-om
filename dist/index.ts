@@ -175,9 +175,15 @@ function isValidCoverageEntry(entry, customType) {
   if (customType === OM_REFLECTIONS_RECORDED) return isNonEmptyArray(entry.data.reflections);
   return isNonEmptyArray(entry.data.observationIds);
 }
+function resetBoundaryIndex(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].type === "reset_boundary") return i;
+  }
+  return -1;
+}
 function latestCoverageIndex(entries, customType) {
   const idToIndex = entryIndexById(entries);
-  let latest = -1;
+  let latest = resetBoundaryIndex(entries);
   for (const entry of entries) {
     if (!isValidCoverageEntry(entry, customType)) continue;
     const coveredIndex = idToIndex.get(entry.data.coversUpToId);
@@ -188,7 +194,7 @@ function latestCoverageIndex(entries, customType) {
 }
 function latestCoverageMarkerId(entries, customType) {
   const idToIndex = entryIndexById(entries);
-  let latestIndex = -1;
+  let latestIndex = resetBoundaryIndex(entries);
   let latestMarkerId;
   for (const entry of entries) {
     if (!isValidCoverageEntry(entry, customType)) continue;
@@ -213,7 +219,7 @@ function earlierCoverageMarkerId(entries, firstId, secondId) {
 }
 function rawTokensAfterIndex(entries, index) {
   let total = 0;
-  for (let i = Math.max(0, index + 1); i < entries.length; i++) {
+  for (let i = Math.max(0, index + 1, resetBoundaryIndex(entries) + 1); i < entries.length; i++) {
     if (isSourceEntry(entries[i])) total += estimateEntryTokens(entries[i]);
   }
   return total;
@@ -266,14 +272,16 @@ function realContextTokensAfterCompaction(entries, compactionIdx) {
   return void 0;
 }
 function realContextTokensAtCoverage(entries, coverageIdx) {
-  for (let i = coverageIdx; i >= 0; i--) {
+  const floor = resetBoundaryIndex(entries) + 1;
+  for (let i = coverageIdx; i >= floor; i--) {
     const t = validAssistantContextTokens(entries[i]);
     if (t !== void 0) return t;
   }
   return void 0;
 }
 function realTokensSinceAnchor(entries, customType, currentContextTokens) {
-  const coverageIdx = customType ? latestCoverageIndex(entries, customType) : -1;
+  const floor = resetBoundaryIndex(entries);
+  const coverageIdx = customType ? latestCoverageIndex(entries, customType) : floor;
   const compactionIdx = findLastCompactionIndex(entries);
   if (compactionIdx > coverageIdx) {
     const baseline = realContextTokensAfterCompaction(entries, compactionIdx);
@@ -281,7 +289,7 @@ function realTokensSinceAnchor(entries, customType, currentContextTokens) {
     const delta = currentContextTokens - baseline;
     return delta >= 0 ? delta : void 0;
   }
-  if (coverageIdx >= 0) {
+  if (coverageIdx > floor) {
     const baseline = realContextTokensAtCoverage(entries, coverageIdx);
     if (baseline === void 0) return void 0;
     const delta = currentContextTokens - baseline;
@@ -290,10 +298,11 @@ function realTokensSinceAnchor(entries, customType, currentContextTokens) {
   return Math.max(0, currentContextTokens);
 }
 function compactionRangeStartIndex(entries) {
+  const floor = resetBoundaryIndex(entries) + 1;
   const compactionIndex = findLastCompactionIndex(entries);
-  if (compactionIndex === -1) return 0;
+  if (compactionIndex === -1) return floor;
   const firstKeptIndex = entryIndexForId(entries, entries[compactionIndex].firstKeptEntryId);
-  return firstKeptIndex === -1 ? compactionIndex + 1 : firstKeptIndex;
+  return Math.max(floor, firstKeptIndex === -1 ? compactionIndex + 1 : firstKeptIndex);
 }
 function rawTokensSinceLastCompaction(entries) {
   return rawTokensAfterIndex(entries, compactionRangeStartIndex(entries) - 1);
@@ -340,7 +349,7 @@ function foldLedger(entries, options = {}) {
   const reflectionsById = /* @__PURE__ */ new Map();
   const droppedObservationIds = /* @__PURE__ */ new Set();
   const endIdx = foldEndIndex(entries, options.upToEntryId);
-  for (let i = 0; i <= endIdx; i++) {
+  for (let i = resetBoundaryIndex(entries) + 1; i <= endIdx; i++) {
     const entry = entries[i];
     if (!entry) continue;
     if (isCustomEntry(entry, OM_OBSERVATIONS_RECORDED)) {
@@ -415,12 +424,14 @@ function foldProjection(entries, options) {
   const observationsBoundary = boundaryIndex(entries, indexes, options.observationsBoundary);
   const reflectionsBoundary = boundaryIndex(entries, indexes, options.reflectionsBoundary);
   const dropsBoundary = boundaryIndex(entries, indexes, options.dropsBoundary);
+  const floor = resetBoundaryIndex(entries);
   const observations = [];
   const reflections = [];
   const observationsById = /* @__PURE__ */ new Set();
   const reflectionsById = /* @__PURE__ */ new Set();
   const droppedObservationIds = /* @__PURE__ */ new Set();
-  for (const entry of entries) {
+  for (let i = floor + 1; i < entries.length; i++) {
+    const entry = entries[i];
     if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary)) {
       for (const observation of entry.data.observations) {
         if (observationsById.has(observation.id)) continue;
@@ -453,7 +464,8 @@ function projectionFromMemoryDetails(details) {
   };
 }
 function latestV3CompactionDetails(entries) {
-  for (let i = entries.length - 1; i >= 0; i--) {
+  const floor = resetBoundaryIndex(entries);
+  for (let i = entries.length - 1; i > floor; i--) {
     const entry = entries[i];
     if (entry.type !== "compaction") continue;
     if (isMemoryDetails(entry.details)) return entry.details;
@@ -477,7 +489,8 @@ function visibleProjection(entries, upToEntryId) {
 }
 function latestFullFoldBoundaryId(entries) {
   const indexes = entryIndexById2(entries);
-  for (let i = entries.length - 1; i >= 0; i--) {
+  const floor = resetBoundaryIndex(entries);
+  for (let i = entries.length - 1; i > floor; i--) {
     const entry = entries[i];
     if (entry.type !== "compaction") continue;
     if (!isMemoryDetails(entry.details)) continue;

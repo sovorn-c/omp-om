@@ -9,7 +9,7 @@ vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
 
 import { HOOK_CATCH_UP_DEADLINE_MS, registerCompactionHook } from "../src/hooks/compaction-hook.js";
 import { OM_OBSERVATIONS_RECORDED } from "../src/session-ledger/index.js";
-import { compactionEntry, observation, observationsRecordedEntry, rawMessage, type TestEntry } from "./fixtures/session.js";
+import { compactionEntry, observation, observationsRecordedEntry, rawMessage, resetBoundary, type TestEntry } from "./fixtures/session.js";
 
 function userMessage(id: string, text = `user ${id}`): TestEntry {
 	return rawMessage(id, text);
@@ -288,6 +288,39 @@ describe("catch-up coverage truthfulness (PR #81 review, issue 2)", () => {
 		const allowed = mockAgents.runObserver.mock.calls[0][0].allowedSourceEntryIds;
 		expect(allowed[0]).toBe("u1");
 		expect(allowed).toEqual(["u1", "a1", "u2", "a2", "u3", "a3"]);
+	});
+});
+
+describe("catch-up and reset_boundary", () => {
+	it("catch-up starts after the reset boundary", async () => {
+		const entries = [
+			userMessage("u0"),
+			assistantMessage("a0"),
+			resetBoundary("rb-1"),
+			userMessage("u1"),
+			assistantMessage("a1"),
+			userMessage("u2"),
+		];
+		mockAgents.runObserver.mockResolvedValueOnce([observation("cccccccccccc", { sourceEntryIds: ["u1", "a1"] })]);
+		const { run, pi } = setup({ entries });
+
+		const result = await run("u2") as any;
+
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runObserver.mock.calls[0][0].allowedSourceEntryIds).toEqual(["u1", "a1"]);
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, expect.objectContaining({ coversUpToId: "a1" }));
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["cccccccccccc"]);
+	});
+
+	it("does not catch up on source that exists only before the boundary", async () => {
+		const entries = [userMessage("u0"), assistantMessage("a0"), resetBoundary("rb-1"), userMessage("u1")];
+		const { run } = setup({ entries });
+
+		const result = await run("u1") as any;
+
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
+		expect(result.compaction.firstKeptEntryId).toBe("u1");
 	});
 });
 

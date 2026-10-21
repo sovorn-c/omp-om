@@ -16,6 +16,7 @@ import {
 	oldV2CompactionDetails,
 	reflection,
 	reflectionsRecordedEntry,
+	resetBoundary,
 	textCustomMessage,
 } from "./fixtures/session.js";
 
@@ -253,5 +254,77 @@ describe("fold boundary persisted by a moved-cut full fold (PR #81 review, issue
 		const entries = branch(memoryDetails({ fullFold: true, observations: [obsB], reflections: [refR] }) as Record<string, unknown>);
 
 		expect(latestFullFoldBoundaryId(entries)).toBe("raw-2");
+	});
+});
+
+describe("reset_boundary floor in projections", () => {
+	const before = observation("aaaaaaaaaaaa");
+	const after = observation("bbbbbbbbbbbb");
+	const refBefore = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+	const refAfter = reflection("ffffffffffff", ["bbbbbbbbbbbb"]);
+	const branch = () => [
+		textCustomMessage("raw-1", "aaaa"),
+		observationsRecordedEntry("om-1", { observations: [before], coversUpToId: "raw-1" }),
+		reflectionsRecordedEntry("om-r1", { reflections: [refBefore], coversUpToId: "raw-1" }),
+		resetBoundary("rb-1"),
+		textCustomMessage("raw-2", "bbbb"),
+		observationsRecordedEntry("om-2", { observations: [after], coversUpToId: "raw-2" }),
+		reflectionsRecordedEntry("om-r2", { reflections: [refAfter], coversUpToId: "raw-2" }),
+		textCustomMessage("raw-3", "cccc"),
+	];
+
+	it("projection after a reset_boundary excludes earlier observations", () => {
+		const projection = buildCompactionProjection(branch(), "raw-3", { observationsPoolMaxTokens: 10_000 });
+
+		expect(projection.fullFold).toBe(false);
+		expect(projection.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(projection.details.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+	});
+
+	it("excludes earlier observations and reflections from a full fold", () => {
+		const projection = buildCompactionProjection(branch(), "raw-3", { observationsPoolMaxTokens: 1 });
+
+		expect(projection.fullFold).toBe(true);
+		expect(projection.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(projection.reflections.map((ref) => ref.id)).toEqual(["ffffffffffff"]);
+	});
+
+	it("full projection ignores everything at or before the boundary", () => {
+		const projection = fullProjection(branch());
+
+		expect(projection.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+		expect(projection.reflections.map((ref) => ref.id)).toEqual(["ffffffffffff"]);
+	});
+
+	it("drops recorded before the boundary do not tombstone later observations", () => {
+		const entries = [
+			observationsDroppedEntry("om-drop", { observationIds: ["bbbbbbbbbbbb"], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-1", "aaaa"),
+			resetBoundary("rb-1"),
+			observationsRecordedEntry("om-2", { observations: [after], coversUpToId: "raw-1" }),
+		];
+
+		expect(fullProjection(entries).observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
+	});
+
+	it("visible projection ignores compaction details from before the boundary", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			compactionEntry("cmp-1", { firstKeptEntryId: "raw-1", details: memoryDetails({ observations: [before], reflections: [refBefore] }) }),
+			resetBoundary("rb-1"),
+			textCustomMessage("raw-2", "bbbb"),
+		];
+
+		expect(visibleProjection(entries)).toEqual({ observations: [], reflections: [] });
+	});
+
+	it("ignores a full-fold compaction from before the boundary as maintenance boundary", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			compactionEntry("cmp-1", { firstKeptEntryId: "raw-1", details: memoryDetails({ fullFold: true }) }),
+			resetBoundary("rb-1"),
+		];
+
+		expect(latestFullFoldBoundaryId(entries)).toBeUndefined();
 	});
 });

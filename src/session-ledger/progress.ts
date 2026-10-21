@@ -42,9 +42,26 @@ function isValidCoverageEntry(entry: Entry, customType: V3MemoryCustomType): ent
 	return isNonEmptyArray(entry.data.observationIds);
 }
 
+/**
+ * Index of the latest `reset_boundary` entry (appended by `/clear`), else -1.
+ * Everything at or before it belongs to a discarded context: catch-up,
+ * coverage, token clocks and projections all treat it as a floor.
+ */
+export function resetBoundaryIndex(entries: Entry[]): number {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		if (entries[i].type === "reset_boundary") return i;
+	}
+	return -1;
+}
+
+/**
+ * Branch index of the latest observation/reflection/drop coverage, never below
+ * the reset boundary: the boundary itself acts as the coverage frontier of a
+ * fresh context, so everything after it counts as uncovered.
+ */
 export function latestCoverageIndex(entries: Entry[], customType: V3MemoryCustomType): number {
 	const idToIndex = entryIndexById(entries);
-	let latest = -1;
+	let latest = resetBoundaryIndex(entries);
 
 	for (const entry of entries) {
 		if (!isValidCoverageEntry(entry, customType)) continue;
@@ -58,7 +75,7 @@ export function latestCoverageIndex(entries: Entry[], customType: V3MemoryCustom
 
 export function latestCoverageMarkerId(entries: Entry[], customType: V3MemoryCustomType): string | undefined {
 	const idToIndex = entryIndexById(entries);
-	let latestIndex = -1;
+	let latestIndex = resetBoundaryIndex(entries);
 	let latestMarkerId: string | undefined;
 
 	for (const entry of entries) {
@@ -88,7 +105,7 @@ export function earlierCoverageMarkerId(entries: Entry[], firstId: string | unde
 
 export function rawTokensAfterIndex(entries: Entry[], index: number): number {
 	let total = 0;
-	for (let i = Math.max(0, index + 1); i < entries.length; i++) {
+	for (let i = Math.max(0, index + 1, resetBoundaryIndex(entries) + 1); i < entries.length; i++) {
 		if (isSourceEntry(entries[i])) total += estimateEntryTokens(entries[i]);
 	}
 	return total;
@@ -196,7 +213,8 @@ export function realContextTokensAfterCompaction(entries: Entry[], compactionIdx
  * full context as "growth" and re-fire stages every turn.
  */
 export function realContextTokensAtCoverage(entries: Entry[], coverageIdx: number): number | undefined {
-	for (let i = coverageIdx; i >= 0; i--) {
+	const floor = resetBoundaryIndex(entries) + 1;
+	for (let i = coverageIdx; i >= floor; i--) {
 		const t = validAssistantContextTokens(entries[i]);
 		if (t !== undefined) return t;
 	}
@@ -219,7 +237,8 @@ export function realTokensSinceAnchor(
 	customType: V3MemoryCustomType | undefined,
 	currentContextTokens: number,
 ): number | undefined {
-	const coverageIdx = customType ? latestCoverageIndex(entries, customType) : -1;
+	const floor = resetBoundaryIndex(entries);
+	const coverageIdx = customType ? latestCoverageIndex(entries, customType) : floor;
 	const compactionIdx = findLastCompactionIndex(entries);
 	if (compactionIdx > coverageIdx) {
 		const baseline = realContextTokensAfterCompaction(entries, compactionIdx);
@@ -227,7 +246,7 @@ export function realTokensSinceAnchor(
 		const delta = currentContextTokens - baseline;
 		return delta >= 0 ? delta : undefined;
 	}
-	if (coverageIdx >= 0) {
+	if (coverageIdx > floor) {
 		const baseline = realContextTokensAtCoverage(entries, coverageIdx);
 		if (baseline === undefined) return undefined;
 		const delta = currentContextTokens - baseline;
@@ -239,14 +258,16 @@ export function realTokensSinceAnchor(
 /**
  * Branch index where Pi's next compaction range starts: the retained boundary
  * (`firstKeptEntryId`) of the latest compaction, the entry after that
- * compaction when the boundary id is missing, or 0 before any compaction.
+ * compaction when the boundary id is missing, or the first entry after the reset
+ * boundary (0 without one). Never earlier than the reset boundary.
  */
 export function compactionRangeStartIndex(entries: Entry[]): number {
+	const floor = resetBoundaryIndex(entries) + 1;
 	const compactionIndex = findLastCompactionIndex(entries);
-	if (compactionIndex === -1) return 0;
+	if (compactionIndex === -1) return floor;
 
 	const firstKeptIndex = entryIndexForId(entries, entries[compactionIndex].firstKeptEntryId);
-	return firstKeptIndex === -1 ? compactionIndex + 1 : firstKeptIndex;
+	return Math.max(floor, firstKeptIndex === -1 ? compactionIndex + 1 : firstKeptIndex);
 }
 
 export function rawTokensSinceLastCompaction(entries: Entry[]): number {

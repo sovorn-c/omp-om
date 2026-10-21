@@ -1,3 +1,4 @@
+import { resetBoundaryIndex } from "./progress.js";
 import {
 	OM_FOLDED,
 	isMemoryDetails,
@@ -86,13 +87,15 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 	const observationsBoundary = boundaryIndex(entries, indexes, options.observationsBoundary);
 	const reflectionsBoundary = boundaryIndex(entries, indexes, options.reflectionsBoundary);
 	const dropsBoundary = boundaryIndex(entries, indexes, options.dropsBoundary);
+	const floor = resetBoundaryIndex(entries);
 	const observations: Observation[] = [];
 	const reflections: Reflection[] = [];
 	const observationsById = new Set<string>();
 	const reflectionsById = new Set<string>();
 	const droppedObservationIds = new Set<string>();
 
-	for (const entry of entries) {
+	for (let i = floor + 1; i < entries.length; i++) {
+		const entry = entries[i];
 		if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary)) {
 			for (const observation of entry.data.observations) {
 				if (observationsById.has(observation.id)) continue;
@@ -130,7 +133,8 @@ function projectionFromMemoryDetails(details: MemoryDetails): Projection {
 }
 
 function latestV3CompactionDetails(entries: Entry[]): MemoryDetails | undefined {
-	for (let i = entries.length - 1; i >= 0; i--) {
+	const floor = resetBoundaryIndex(entries);
+	for (let i = entries.length - 1; i > floor; i--) {
 		const entry = entries[i];
 		if (entry.type !== "compaction") continue;
 		if (isMemoryDetails(entry.details)) return entry.details;
@@ -158,7 +162,8 @@ export function visibleProjection(entries: Entry[], upToEntryId?: string): Proje
 
 export function latestFullFoldBoundaryId(entries: Entry[]): string | undefined {
 	const indexes = entryIndexById(entries);
-	for (let i = entries.length - 1; i >= 0; i--) {
+	const floor = resetBoundaryIndex(entries);
+	for (let i = entries.length - 1; i > floor; i--) {
 		const entry = entries[i];
 		if (entry.type !== "compaction") continue;
 		if (!isMemoryDetails(entry.details)) continue;

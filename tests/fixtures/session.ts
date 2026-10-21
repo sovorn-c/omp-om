@@ -108,6 +108,16 @@ export function compactionEntry(
 	};
 }
 
+export function resetBoundary(id: string, overrides: Partial<TestEntry> = {}): TestEntry {
+	return {
+		type: "reset_boundary",
+		id,
+		parentId: null,
+		timestamp: DEFAULT_TIMESTAMP,
+		...overrides,
+	};
+}
+
 export function memoryDetails(
 	args: {
 		fullFold?: boolean;

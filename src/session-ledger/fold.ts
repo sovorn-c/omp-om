@@ -1,3 +1,4 @@
+import { resetBoundaryIndex } from "./progress.js";
 import {
 	isObservationsDroppedData,
 	isObservationsRecordedData,
@@ -45,7 +46,8 @@ function isCustomEntry(entry: Entry, customType: string): boolean {
  *
  * Unknown custom entries, old V2 entries, invalid V3-shaped data, and compaction details are ignored.
  * Observations and reflections use first-valid-record-wins semantics. Drops are tombstones and are
- * retained even when the dropped id is unknown at the time of folding.
+ * retained even when the dropped id is unknown at the time of folding. Entries at or before the
+ * latest `reset_boundary` are ignored.
  */
 export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): FoldedLedger {
 	const observationsById = new Map<string, Observation>();
@@ -53,7 +55,7 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 	const droppedObservationIds = new Set<string>();
 	const endIdx = foldEndIndex(entries, options.upToEntryId);
 
-	for (let i = 0; i <= endIdx; i++) {
+	for (let i = resetBoundaryIndex(entries) + 1; i <= endIdx; i++) {
 		const entry = entries[i];
 		if (!entry) continue;
 
