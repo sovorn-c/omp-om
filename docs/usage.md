@@ -47,8 +47,6 @@ The hook (`src/hooks/compaction-hook.ts`) never throws and never returns `undefi
 3. **Model-free summary.** If the tail cannot be retained, or no record fits the summary budget, the hook renders a deterministic summary with no model: a fixed header, the ledger that fits, and excerpts of the unobserved input. With an empty ledger it says no memory was recorded.
 4. **Last resort.** If the hook body itself throws, it keeps omp's cut and renders whatever still works, or a fixed notice. A signal abort cancels the compaction instead. A second compaction while one is running is cancelled as a duplicate.
 
-Overflow recovery (`reason: "overflow"`) never moves the cut back, because that would risk overflowing again.
-
 ## `/clear` and `reset_boundary`
 
 `/clear` appends a `reset_boundary` entry. omp-om treats the latest one as a floor: entries at or before it are ignored for catch-up, coverage and the rendered summary, so memory from before `/clear` does not leak into a fresh context. A worker run that was already in flight when you cleared may still append its record after the boundary; records whose coverage marker points at or before the boundary are ignored too. This is implemented in `src/session-ledger/progress.ts`, `fold.ts` and `projection.ts` and covered by unit tests; it was not exercised in the smoke runs.
@@ -69,7 +67,7 @@ Warnings appear only when the session has a UI (`ctx.hasUI`). In the smoke runs 
 | `memory model unavailable: …; compacting without catching up the observer` | Same cause, hit during a compaction. The ledger recorded so far is rendered. |
 | `observer catch-up reached the 20s hook deadline; compacting with the memory recorded so far` | The model was too slow to reach the cut. Use a faster `model`, or lower `observeAfterTokens` so the background observer stays ahead. |
 | `observer catch-up failed: …; compacting with the memory recorded so far` | The observer call failed during catch-up. The reason text comes from the provider. |
-| `observer has not reached N source entries (~T tokens) before the compaction cut and they cannot be retained (…); compacting with a model-free summary of the memory so far` | Step 3 of the ladder. The reason in parentheses says why (`no observation coverage`, `overflow recovery`, retained budget exceeded, nothing observed can be compacted). |
+| `observer has not reached N source entries (~T tokens) before the compaction cut and they cannot be retained (…); compacting with a model-free summary of the memory so far` | Step 3 of the ladder. The reason in parentheses says why (`no observation coverage`, retained budget exceeded, nothing observed can be compacted). |
 | `observer has not reached … before the compaction cut; keeping them in context until they are observed` | Info only. Step 2: the cut moved back to keep the tail. |
 | `no memory record fits the ~N-token summary budget; using a truncated model-free summary` | `compactionSummaryMaxTokens` is too small for the smallest record. Raise it. |
 | `compaction hook failed (…); compacting with a model-free summary` | Unexpected error in the hook. Enable `debugLog` and report it. |

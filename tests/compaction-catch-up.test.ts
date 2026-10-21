@@ -108,7 +108,6 @@ function setup(args: {
 	const run = (firstKeptEntryId: string) => handler!({
 		preparation: { firstKeptEntryId, tokensBefore: 123 },
 		branchEntries: args.entries,
-		reason: "threshold",
 		willRetry: false,
 		signal: args.signal ?? new AbortController().signal,
 	}, ctx);

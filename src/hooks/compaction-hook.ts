@@ -98,7 +98,7 @@ export type CompactionCutResolution =
 export function resolveCompactionCut(
 	entries: Entry[],
 	firstKeptEntryId: string,
-	options: { maxRetainedTokens: number; reason?: string },
+	options: { maxRetainedTokens: number },
 ): CompactionCutResolution {
 	const piCut: CompactionCut = { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId };
 	const cutIndex = entryIndexForId(entries, firstKeptEntryId);
@@ -106,10 +106,6 @@ export function resolveCompactionCut(
 
 	const gap = unobservedSourceSpanBefore(entries, cutIndex);
 	if (!gap) return { kind: "cut", cut: piCut };
-
-	// Overflow recovery must free context now; retaining more than Pi asked
-	// for risks overflowing again on the retried turn.
-	if (options.reason === "overflow") return { kind: "fallback", cut: piCut, reason: "overflow recovery", gap };
 
 	const coverageMarkerId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
 	if (!coverageMarkerId) return { kind: "fallback", cut: piCut, reason: "no observation coverage", gap };
@@ -248,8 +244,7 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 	const maxRetainedTokens = resolveCompactionMaxRetainedTokens(runtime.config, contextWindow);
 	const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
 	const poolMaxTokens = observationsPoolMaxTokens(runtime);
-	const reason = (event as { reason?: string }).reason;
-	let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
+	let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
 
 	// The background observer is behind Pi's cut. Rather than retaining the
 	// tail or compacting blind, observe the gap now: Pi waits for this hook,
@@ -267,7 +262,7 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 		// Chunks recorded before a deadline or error are durable; re-read the
 		// branch so the cut and the folded memory include them.
 		entries = (ctx.sessionManager?.getBranch?.() as Entry[] | undefined) ?? entries;
-		resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
+		resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
 	}
 
 	const summaryOptions = { maxTokens: summaryMaxTokens, observationsPoolMaxTokens: poolMaxTokens };

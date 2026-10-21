@@ -1956,7 +1956,6 @@ function resolveCompactionCut(entries, firstKeptEntryId, options) {
   if (cutIndex === -1) return { kind: "cut", cut: piCut };
   const gap = unobservedSourceSpanBefore(entries, cutIndex);
   if (!gap) return { kind: "cut", cut: piCut };
-  if (options.reason === "overflow") return { kind: "fallback", cut: piCut, reason: "overflow recovery", gap };
   const coverageMarkerId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
   if (!coverageMarkerId) return { kind: "fallback", cut: piCut, reason: "no observation coverage", gap };
   const rangeStart = compactionRangeStartIndex(entries);
@@ -2060,15 +2059,14 @@ async function handleCompaction(pi, event, ctx, runtime) {
   const maxRetainedTokens = resolveCompactionMaxRetainedTokens(runtime.config, contextWindow);
   const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
   const poolMaxTokens = observationsPoolMaxTokens(runtime);
-  const reason = event.reason;
-  let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
+  let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
   if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !runtime.consolidationInFlight) {
     const catchUp = await catchUpWithDeadline({ pi, runtime, ctx, entries, gap: resolution.gap }, event.signal);
     if (event.signal?.aborted) return { cancel: true };
     debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
     warnCatchUpStopped(ctx, catchUp);
     entries = ctx.sessionManager?.getBranch?.() ?? entries;
-    resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
+    resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
   }
   const summaryOptions = { maxTokens: summaryMaxTokens, observationsPoolMaxTokens: poolMaxTokens };
   let fallback = resolution.kind === "fallback" ? resolution : void 0;

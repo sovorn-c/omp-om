@@ -88,10 +88,9 @@ function setup(args: {
 		model: args.model,
 		sessionManager: { getBranch: vi.fn(() => args.entries) },
 	};
-	const run = (firstKeptEntryId: string, reason: "manual" | "threshold" | "overflow" = "threshold") => handler!({
+	const run = (firstKeptEntryId: string) => handler!({
 		preparation: { firstKeptEntryId, tokensBefore: 123 },
 		branchEntries: args.entries,
-		reason,
 		willRetry: false,
 		signal: undefined,
 	}, ctx);
@@ -174,16 +173,6 @@ describe("compaction hook when the observer is behind Pi's cut", () => {
 
 		const roomy = setup({ entries: laggingBranch(), model: { contextWindow: 4_000 } });
 		expect(((await roomy.run("u2")) as any).compaction.firstKeptEntryId).toBe("a1");
-	});
-
-	it("falls back to Pi's cut during overflow recovery instead of retaining more context", async () => {
-		const { run, ctx } = setup({ entries: laggingBranch() });
-
-		const result = await run("u2", "overflow") as any;
-
-		expect(result.compaction.firstKeptEntryId).toBe("u2");
-		expect(result.compaction.summary).toContain("2 source entries (~7 tokens)");
-		expect(ctx.ui.notify.mock.calls[0][0]).toContain("overflow recovery");
 	});
 
 	it("cuts inside a single long turn at the assistant message after the observation frontier", async () => {
