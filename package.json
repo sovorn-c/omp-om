@@ -1,0 +1,54 @@
+{
+  "name": "omp-om",
+  "version": "0.1.0",
+  "description": "Observational memory extension for omp — a fork of pi-observational-memory.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "omp",
+    "pi",
+    "extension",
+    "observational-memory",
+    "memory",
+    "compaction"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.ts"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "./dist/index.ts"
+    ]
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "LICENSE",
+    "NOTICE.md",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.87.0",
+    "@earendil-works/pi-ai": "^0.87.0",
+    "@earendil-works/pi-coding-agent": "^0.87.0",
+    "@earendil-works/pi-tui": "^0.87.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.2",
+    "typebox": "^1.1.38",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.5"
+  }
+}
