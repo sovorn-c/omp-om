@@ -77,6 +77,19 @@ See [docs/usage.md](docs/usage.md) for every key, the derived budgets, the fallb
 - `/om:status`: shows memory counts, progress toward the next observation and reflection, and observer backlog.
 - `/om:view [full]`: prints and copies the visible memory; `full` includes recorded memory that the summary omits.
 
+## Development checks
+
+Use Node.js 24 and run the same checks as CI:
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+[GitHub Actions](.github/workflows/ci.yml) runs these checks on pushes, pull requests and manual dispatches, using Ubuntu and an npm cache keyed by `package-lock.json`. The tests use fixtures and simulated provider responses; no model endpoint, API key or GitHub secret is required. Live model integration smoke remains a separate manual check, recorded in [docs/smoke-results.md](docs/smoke-results.md).
+
 ## Based on pi-observational-memory
 
 omp-om is a fork of [pi-observational-memory](https://github.com/elpapi42/pi-observational-memory) 3.1.4 by elpapi42, adapted to run on omp. It is MIT licensed. See [NOTICE.md](NOTICE.md) for the attribution and the original license text.
