@@ -45,6 +45,13 @@ omp -e /path/to/omp-om
 
 To remove it: `omp plugin uninstall omp-om`.
 
+## Update
+
+- Installed from GitHub: `omp plugin upgrade omp-om`, then restart omp.
+- Linked from a clone: `git pull` in the clone, then restart omp. `dist/` is committed, so no rebuild is needed.
+
+Your `omp-om.json` and existing session memory are untouched by updates.
+
 ## Quick start
 
 1. Install the plugin (above) and start omp. It works with no configuration: the memory model defaults to your `@smol` role model.
