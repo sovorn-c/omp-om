@@ -846,7 +846,7 @@ describe("V3 consolidation trigger", () => {
 });
 
 describe("observer chunk cap", () => {
-	it("caps an oversized backlog and drains it incrementally across runs", async () => {
+	it("caps an oversized backlog to one chunk per run, advancing across runs", async () => {
 		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
 		const second = observation("222222222222", { sourceEntryIds: ["raw-2"], tokenCount: 4 });
 		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce([second]);

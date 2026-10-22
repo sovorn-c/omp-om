@@ -10,13 +10,15 @@ While you work, three background workers write observations to the session journ
 - **Reflector**: distills durable reflections from observations.
 - **Dropper**: drops observations that reflections already cover, to keep the pool small.
 
-When omp compacts, omp-om renders the ledger as the compaction summary and omp skips its own summarizer. If the ledger is behind, omp-om catches the observer up first, within a 20 second deadline.
+When omp compacts, omp-om renders the existing ledger as the compaction summary at omp's own cut, and omp skips its own summarizer. Compaction makes no model call. If the ledger is empty, omp-om declines and omp's normal summarizer runs.
 
-If the memory model can't be resolved, authenticated or reached, omp-om warns, stops that memory pass and hands compaction back to omp's normal summarizer. Your conversation keeps working. The next successful worker request restores ledger compaction.
+Memory work runs in the background. If the memory model can't be resolved, authenticated or reached, omp-om warns and that pass stops; the next due run retries. A failing worker does not hand compaction back to omp while the ledger has records.
+
+Like upstream Pi OM, this does not guarantee coverage: if the observer is behind, unobserved content before omp's cut is not included in the ledger summary. The hook does not wait, catch up or preserve that gap.
 
 ### Model usage
 
-Ledger compaction avoids omp's summarization call, but the workers (and any observer catch-up before a compaction) still call your memory model. If you want zero model calls, use omp's native `snapcompact` + `shake` instead.
+Ledger compaction avoids omp's summarization call and makes no model call itself, but the background workers still call your memory model. If you want zero model calls, use omp's native `snapcompact` + `shake` instead.
 
 ## Install
 
@@ -88,7 +90,6 @@ observationsPoolMaxTokens: 20000
 # observationsPoolTargetTokens: 10000
 agentMaxTurns: 16
 agentMaxTokens: 32000
-compactionCatchUpMaxChunks: 2
 showWorkerNotifications: true
 passive: false
 debugLog: false
@@ -100,7 +101,7 @@ The smallest useful file just picks a model:
 model: "@smol"
 ```
 
-A bad file never breaks omp. A file that is not valid YAML or not a mapping is skipped with a warning, and a single bad value is ignored so the default stays. Numeric values must be positive integers (`compactionCatchUpMaxChunks` may be `0`). `/om:status` lists config warnings.
+A bad file never breaks omp. A file that is not valid YAML or not a mapping is skipped with a warning, and a single bad value is ignored so the default stays. Numeric values must be positive integers. `/om:status` lists config warnings.
 
 Earlier builds read `omp-om.json`. That file is no longer read: if one exists, omp-om does not create `omp-om.yml` and `/om:status` warns until you move the settings over and delete it.
 
@@ -115,16 +116,13 @@ Earlier builds read `omp-om.json`. That file is no longer read: if one exists, o
 | `observationsPoolTargetTokens` | half of `observationsPoolMaxTokens` | Size the dropper trims the pool toward. Ignored if not smaller than the max. Not in the block above because it follows the max. |
 | `agentMaxTurns` | `16` | Turn cap for each worker loop. Records written before the cap is hit are kept. |
 | `agentMaxTokens` | `32000` | Output token request for worker loops, clamped to the model's own limit. Lower it for local servers with a small context. |
-| `compactionCatchUpMaxChunks` | `2` | Observer chunks allowed synchronously before a compaction. `0` disables catch-up. |
-| `observerChunkMaxTokens` | derived | Cap on one observer chunk (minimum `256`). Unset: a fifth of the memory model's context window, or `60000` if unknown. |
+| `observerChunkMaxTokens` | derived | Cap on one observer chunk (minimum `256`). Unset: a fifth of the memory model's context window. If the window is unknown, `60000`. |
 | `workerMemoryMaxTokens` | derived | Budget for prior memory carried by each worker request. Unset: a quarter of the memory model's window, or `16000`. |
-| `compactionSummaryMaxTokens` | `25000` | Budget for the rendered summary. Fixed so it stays under omp's compaction threshold on large-window models. If unset, an eighth of the session model's window, or `8000`. |
-| `compactionMaxRetainedTokens` | derived | How much unobserved conversation may stay in context past omp's cut. Default `30000`; if unset, one eighth of the session model's window. |
 | `showWorkerNotifications` | `true` | Show routine worker progress notices when the session has a UI. Failure warnings are always shown. |
 | `passive` | `false` | Turn off the automatic workers. The commands, `om_recall` and the compaction hook stay active. |
 | `debugLog` | `false` | Write debug events as NDJSON under `<agent dir>/observational-memory/debug/<session id>.ndjson`. |
 
-Worker thinking level is fixed at `low`. Options inherited from Pi OM that omp-om no longer supports (`compactAfterTokens`, `compactAfterTokensMode`, `compactAfterTokensRatio`, `consolidateWhenIdle`, `fallbackModel`) are ignored with a warning.
+Worker thinking level is fixed at `low`. Options that omp-om no longer supports (`compactAfterTokens`, `compactAfterTokensMode`, `compactAfterTokensRatio`, `consolidateWhenIdle`, `fallbackModel`, `compactionCatchUpMaxChunks`, `compactionMaxRetainedTokens`, `compactionSummaryMaxTokens`) are ignored with a warning.
 
 Subagent sessions never run the background workers; only the main session's ledger is observed.
 
@@ -138,14 +136,16 @@ Subagent sessions never run the background workers; only the main session's ledg
 
 ## Compaction behavior
 
-When omp compacts, omp-om decides in this order:
+Memory work runs in the background. The observer and reflector run once their token thresholds are due, and the dropper runs after a successful reflection. Compaction does not wait for them.
 
-1. **Memory model unhealthy** (can't resolve, can't authenticate, request failed, 20 second deadline hit): warn and let omp's normal summarizer run.
-2. **Ledger behind omp's cut:** if a background run is still in its observer stage, wait for that stage to finish (up to 15 seconds; its reflector and dropper are not waited for), then the observer catches up the rest, up to `compactionCatchUpMaxChunks` chunks. Catch-up starts only with at least 8 seconds of the deadline left and stops 2 seconds before it; a slow catch-up is not an outage, so omp-om keeps what it recorded and compacts with its own summary. If the remaining tail fits, the cut moves back to keep it in context.
-3. **Tail or summary doesn't fit the budget:** omp-om writes a deterministic summary from the ledger that fits plus excerpts of the unobserved input.
+When omp compacts, omp-om renders the ledger it already has, without calling a model:
+
+1. **Ledger has records:** the summary is the rendered ledger (reflections after a full fold, then observations), and omp keeps the conversation after its own cut.
+2. **Ledger empty:** omp-om declines, and omp's normal summarizer runs so the pre-cut context is still summarized.
+3. **Background failures** are shown as warnings but never force omp's normal summarizer while the ledger has records.
 4. **Cancellation:** a user abort cancels compaction. A second compaction while one is running is cancelled as a duplicate.
 
-A failed worker request discards its partial output and never advances coverage. The memory model is considered healthy again after the next worker request that completes successfully, even if it produces no records.
+A failed worker request discards its partial output and never advances coverage, so the work stays due and is retried on a later run.
 
 ## Troubleshooting
 
@@ -153,13 +153,8 @@ Warnings appear only in sessions with a UI. Turn on `debugLog` to see the underl
 
 | Message | Cause and fix |
 | --- | --- |
-| `observer failed: memory model "…" did not resolve …` | Fix `model` or its credentials. omp uses normal compaction until a worker request succeeds. |
-| `memory model unavailable: …` | Resolution or authentication failed before compaction. omp's normal compaction runs. |
-| `memory work reached the 20s hook deadline` | Authentication or in-flight wait took too long. omp's normal compaction runs; late worker results are ignored. A slow catch-up stops before the deadline and does not trigger this. |
-| `observer catch-up failed: …` | The catch-up request failed; the provider's reason is included. omp's normal compaction runs. |
-| `observer has not reached …; keeping them in context until they are observed` | Info only: the cut moved back to retain unobserved conversation. |
-| `no memory record fits the ~N-token summary budget; using a truncated model-free summary` | Raise `compactionSummaryMaxTokens`. |
-| `compaction hook failed: …` | Unexpected error. omp's normal compaction runs. Enable `debugLog` and report it. |
+| `observer failed: …` (also `reflector failed`, `dropper failed`) | A background worker request failed; the provider's reason is included. Coverage does not advance, and the work is retried on a later run. Compaction still renders the existing ledger. |
+| `another compaction is already in progress; cancelling duplicate` | A second compaction started while one was running and was cancelled. No action needed. |
 
 Other checks:
 

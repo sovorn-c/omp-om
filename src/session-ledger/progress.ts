@@ -44,8 +44,8 @@ function isValidCoverageEntry(entry: Entry, customType: V3MemoryCustomType): ent
 
 /**
  * Index of the latest `reset_boundary` entry (appended by `/clear`), else -1.
- * Everything at or before it belongs to a discarded context: catch-up,
- * coverage, token clocks and projections all treat it as a floor.
+ * Everything at or before it belongs to a discarded context: coverage,
+ * token clocks and projections all treat it as a floor.
  */
 export function resetBoundaryIndex(entries: Entry[]): number {
 	for (let i = entries.length - 1; i >= 0; i--) {
@@ -295,37 +295,3 @@ export function observedTokensSinceLastCompaction(entries: Entry[]): number {
 	return total;
 }
 
-export type UnobservedSourceSpan = {
-	/** Branch index of the first unobserved source entry. */
-	firstIndex: number;
-	/** Branch index of the last unobserved source entry before the cut. */
-	lastIndex: number;
-	entryCount: number;
-	tokens: number;
-};
-
-/**
- * Source entries inside the current compaction range, before `cutIndex`
- * (exclusive), that observation coverage has not reached yet. These are the
- * entries a compaction cutting at `cutIndex` would discard without any memory
- * representation. Returns undefined when coverage reaches the cut.
- */
-export function unobservedSourceSpanBefore(entries: Entry[], cutIndex: number): UnobservedSourceSpan | undefined {
-	const coverageIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-	const start = Math.max(coverageIndex + 1, compactionRangeStartIndex(entries));
-	let firstIndex = -1;
-	let lastIndex = -1;
-	let entryCount = 0;
-	let tokens = 0;
-
-	for (let i = start; i < cutIndex && i < entries.length; i++) {
-		if (!isSourceEntry(entries[i])) continue;
-		if (firstIndex === -1) firstIndex = i;
-		lastIndex = i;
-		entryCount++;
-		tokens += estimateEntryTokens(entries[i]);
-	}
-
-	if (firstIndex === -1) return undefined;
-	return { firstIndex, lastIndex, entryCount, tokens };
-}

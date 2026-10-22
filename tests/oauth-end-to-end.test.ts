@@ -219,7 +219,7 @@ describe("OAuth provider end-to-end consolidation", () => {
 		await runtime.consolidationPromise;
 
 		const warning = notices.find((message) => message.includes("/login openai-codex"));
-		expect(warning).toContain("normal compaction");
+		expect(notices).toContainEqual(expect.stringContaining("/login openai-codex"));
 		expect(runtime.memoryFailureReason).toContain("authentication failed");
 		expect(appended).toEqual([]);
 

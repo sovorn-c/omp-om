@@ -347,7 +347,7 @@ export class Runtime {
 		this.memoryFailureReason = reason;
 		if (!alreadyNotified && ctx.hasUI && ctx.ui) {
 			try {
-				ctx.ui.notify(`Observational memory: ${reason} (model "${this.config.model}"). Memory updates stopped for this pass; you can continue working. omp will use normal compaction until a worker request succeeds.`, "warning");
+				ctx.ui.notify(`Observational memory: ${reason} (model "${this.config.model}"). Memory updates stopped for this pass; you can continue working. Existing memory remains available for compaction.`, "warning");
 			} catch {
 				// A notification failure must not reject background work.
 			}

@@ -49,7 +49,7 @@ function setup(entries: TestEntry[] = [rawMessage("raw-1", "Deploy to eu-west-1"
 
 beforeEach(() => loop.mockReset().mockImplementation(partialFailure));
 
-describe("real worker outcomes preserve native fallback", () => {
+describe("real background worker outcomes", () => {
 	it("keeps an outage when bounded reflector input skips the request", async () => {
 		const app = setup([
 			rawMessage("raw-1", "Deploy to eu-west-1"),
@@ -73,11 +73,4 @@ describe("real worker outcomes preserve native fallback", () => {
 		await expect(app.compact()).resolves.toBeUndefined();
 	});
 
-	it("delegates catch-up compaction without coverage after tool output followed by provider failure", async () => {
-		const app = setup();
-		await expect(app.compact()).resolves.toBeUndefined();
-		expect(app.pi.appendEntry).not.toHaveBeenCalled();
-		expect(app.runtime.memoryFailureReason).toContain("provider disconnected after tool output");
-		expect(app.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("normal compaction"), "warning");
-	});
 });

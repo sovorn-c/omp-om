@@ -19,27 +19,6 @@ export interface Config {
 	 */
 	model: string;
 	/**
-	 * Maximum estimated source tokens the compaction hook may keep in context
-	 * when it moves Pi's retention boundary back to the observer frontier so
-	 * that unobserved entries are not discarded. Unset (default) derives the
-	 * budget from the active session model's context window; see
-	 * {@link resolveCompactionMaxRetainedTokens}.
-	 */
-	compactionMaxRetainedTokens?: number;
-	/**
-	 * Estimated token budget for the memory summary the compaction hook renders.
-	 * Unset (default) derives it from the session model's context window; see
-	 * {@link resolveCompactionSummaryMaxTokens}.
-	 */
-	compactionSummaryMaxTokens?: number;
-	/**
-	 * Maximum observer chunks the compaction hook may run synchronously to cover
-	 * source entries the background observer has not reached before Pi's cut,
-	 * so the hook can own the compaction instead of delegating to Pi's native
-	 * summarizer. 0 disables synchronous catch-up.
-	 */
-	compactionCatchUpMaxChunks: number;
-	/**
 	 * Estimated token budget for the prior memory (reflections and observations)
 	 * carried by each observer, reflector, and dropper request. Unset derives it
 	 * from the memory model's context window; see {@link resolveWorkerMemoryMaxTokens}.
@@ -68,9 +47,6 @@ export const DEFAULTS: Config = {
 	observationsPoolTargetTokens: 10_000,
 	agentMaxTurns: 16,
 	agentMaxTokens: 32_000,
-	compactionCatchUpMaxChunks: 2,
-	compactionMaxRetainedTokens: 30000,
-	compactionSummaryMaxTokens: 25000,
 	model: "@smol",
 	showWorkerNotifications: true,
 	passive: false,
@@ -79,59 +55,6 @@ export const DEFAULTS: Config = {
 
 /** Thinking level for every memory worker call; the one `model` key carries no per-model setting. */
 export const WORKER_THINKING_LEVEL = "low";
-
-/** Retained-tail budget used when `compactionMaxRetainedTokens` is unset and the context window is unknown. */
-export const COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 25_000;
-
-/**
- * Fraction of the session model's context window the compaction hook may keep
- * when it retains unobserved source entries past omp's proposed cut. One
- * eighth of the window keeps retained tail plus the default summary budget
- * (also one eighth) well below omp's post-compaction recovery band
- * (0.8 x compaction threshold), so a moved cut cannot re-trigger compaction.
- */
-export const COMPACTION_RETAINED_CONTEXT_RATIO = 0.125;
-
-/**
- * Resolve how many estimated source tokens the compaction hook may retain when
- * observation coverage lags behind Pi's proposed retention boundary.
- *
- * An explicit `compactionMaxRetainedTokens` always wins. Otherwise the budget
- * is `floor(contextWindow * COMPACTION_RETAINED_CONTEXT_RATIO)` for the active
- * session model, falling back to {@link COMPACTION_RETAINED_FALLBACK_MAX_TOKENS}
- * when the window is unknown.
- */
-export function resolveCompactionMaxRetainedTokens(config: Config, contextWindow: number | undefined): number {
-	if (config.compactionMaxRetainedTokens !== undefined && config.compactionMaxRetainedTokens > 0) {
-		return config.compactionMaxRetainedTokens;
-	}
-	if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-		return Math.max(1, Math.floor(contextWindow * COMPACTION_RETAINED_CONTEXT_RATIO));
-	}
-	return COMPACTION_RETAINED_FALLBACK_MAX_TOKENS;
-}
-
-/** Summary budget used when `compactionSummaryMaxTokens` is unset and the context window is unknown. */
-export const COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS = 8_000;
-
-/** Fraction of the session model's context window the rendered memory summary may occupy by default. */
-export const COMPACTION_SUMMARY_CONTEXT_RATIO = 0.125;
-
-/**
- * Resolve the estimated token budget for the rendered compaction summary. An
- * explicit `compactionSummaryMaxTokens` wins; otherwise one eighth of the
- * session model's context window, or {@link COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS}
- * when the window is unknown.
- */
-export function resolveCompactionSummaryMaxTokens(config: Config, contextWindow: number | undefined): number {
-	if (config.compactionSummaryMaxTokens !== undefined && config.compactionSummaryMaxTokens > 0) {
-		return config.compactionSummaryMaxTokens;
-	}
-	if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-		return Math.max(1, Math.floor(contextWindow * COMPACTION_SUMMARY_CONTEXT_RATIO));
-	}
-	return COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS;
-}
 
 /** Worker prior-memory budget used when unset and the memory model's context window is unknown. */
 export const WORKER_MEMORY_FALLBACK_MAX_TOKENS = 16_000;
@@ -226,19 +149,9 @@ observationsPoolMaxTokens: 20000
 agentMaxTurns: 16
 agentMaxTokens: 32000
 
-# Observer chunks allowed synchronously before a compaction; 0 disables.
-compactionCatchUpMaxChunks: 2
-
-# Most unobserved conversation a compaction may keep past omp's cut. Keep it
-# well under omp's compaction threshold so a compaction cannot re-trigger itself.
-compactionMaxRetainedTokens: 30000
-
-# Largest memory summary a compaction renders. Fixed rather than scaled to the
-# window so it stays under omp's threshold on 1M-window models too.
-compactionSummaryMaxTokens: 25000
-
-# Derived from the model's context window when unset:
+# Unset: derived from the memory model's context window (a fifth of it; 60000 if unknown).
 # observerChunkMaxTokens: 60000
+# Unset: derived from the memory model's context window (a quarter of it; 16000 if unknown).
 # workerMemoryMaxTokens: 16000
 
 showWorkerNotifications: true
@@ -255,6 +168,9 @@ const REMOVED_KEYS = [
 	"compactAfterTokensRatio",
 	"consolidateWhenIdle",
 	"fallbackModel",
+	"compactionCatchUpMaxChunks",
+	"compactionMaxRetainedTokens",
+	"compactionSummaryMaxTokens",
 ] as const;
 
 function positiveIntegerOrUndefined(value: unknown): number | undefined {
@@ -284,8 +200,6 @@ function normalizeSettingsConfig(path: string, value: Record<string, unknown>, w
 		"observeAfterTokens",
 		"reflectAfterTokens",
 		"observerChunkMaxTokens",
-		"compactionMaxRetainedTokens",
-		"compactionSummaryMaxTokens",
 		"workerMemoryMaxTokens",
 		"observationsPoolMaxTokens",
 		"observationsPoolTargetTokens",
@@ -295,9 +209,6 @@ function normalizeSettingsConfig(path: string, value: Record<string, unknown>, w
 	for (const key of numberKeys) {
 		const normalizedValue = positiveIntegerOrUndefined(value[key]);
 		if (normalizedValue !== undefined) normalized[key] = normalizedValue;
-	}
-	if (Number.isInteger(value.compactionCatchUpMaxChunks) && (value.compactionCatchUpMaxChunks as number) >= 0) {
-		normalized.compactionCatchUpMaxChunks = value.compactionCatchUpMaxChunks as number;
 	}
 	if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;

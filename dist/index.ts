@@ -1680,7 +1680,7 @@ var require_log = __commonJS({
       if (logLevel === "debug")
         console.log(...messages);
     }
-    function warn2(logLevel, warning) {
+    function warn(logLevel, warning) {
       if (logLevel === "debug" || logLevel === "warn") {
         if (typeof node_process.emitWarning === "function")
           node_process.emitWarning(warning);
@@ -1689,7 +1689,7 @@ var require_log = __commonJS({
       }
     }
     exports.debug = debug;
-    exports.warn = warn2;
+    exports.warn = warn;
   }
 });
 
@@ -7682,23 +7682,6 @@ function observedTokensSinceLastCompaction(entries) {
   }
   return total;
 }
-function unobservedSourceSpanBefore(entries, cutIndex) {
-  const coverageIndex2 = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-  const start = Math.max(coverageIndex2 + 1, compactionRangeStartIndex(entries));
-  let firstIndex = -1;
-  let lastIndex = -1;
-  let entryCount = 0;
-  let tokens = 0;
-  for (let i = start; i < cutIndex && i < entries.length; i++) {
-    if (!isSourceEntry(entries[i])) continue;
-    if (firstIndex === -1) firstIndex = i;
-    lastIndex = i;
-    entryCount++;
-    tokens += estimateEntryTokens(entries[i]);
-  }
-  if (firstIndex === -1) return void 0;
-  return { firstIndex, lastIndex, entryCount, tokens };
-}
 
 // src/session-ledger/fold.ts
 function foldEndIndex(entries, upToEntryId) {
@@ -8065,177 +8048,18 @@ function observationToSummaryLine(observation) {
 function reflectionToSummaryLine(reflection) {
   return `[${reflection.id}] ${reflection.content}`;
 }
-var SUMMARY_OBSERVATIONS_MIN_SHARE = 0.5;
-function estimateTokens(text) {
-  return Math.ceil(text.length / 4);
-}
-function selectWithinBudget(records, line, budget) {
-  const keptIndexes = [];
-  let tokens = 0;
-  for (let i = records.length - 1; i >= 0; i--) {
-    const cost = estimateTokens(line(records[i])) + 1;
-    if (tokens + cost > budget) continue;
-    tokens += cost;
-    keptIndexes.push(i);
-  }
-  keptIndexes.reverse();
-  return { kept: keptIndexes.map((i) => records[i]), tokens };
-}
-function renderSummaryWithBudget(reflections, observations, options = {}) {
-  if (reflections.length === 0 && observations.length === 0) {
-    return { text: "", reflections: [], observations: [], omittedReflections: 0, omittedObservations: 0 };
-  }
-  let keptReflections = reflections;
-  let keptObservations = observations;
-  const maxTokens = options.maxTokens;
-  if (maxTokens !== void 0 && Number.isFinite(maxTokens) && maxTokens > 0) {
-    const fixed = estimateTokens(CONTEXT_USAGE_INSTRUCTIONS) + estimateTokens("## Reflections\n## Observations\n\n\n\n") + 40;
-    const budget = Math.max(0, maxTokens - fixed);
-    const reserved = selectWithinBudget(observations, observationToSummaryLine, Math.floor(budget * SUMMARY_OBSERVATIONS_MIN_SHARE));
-    const pickedReflections = selectWithinBudget(reflections, reflectionToSummaryLine, budget - reserved.tokens);
-    keptReflections = pickedReflections.kept;
-    keptObservations = selectWithinBudget(observations, observationToSummaryLine, budget - pickedReflections.tokens).kept;
-  }
-  const omittedReflections = reflections.length - keptReflections.length;
-  const omittedObservations = observations.length - keptObservations.length;
+function renderSummary(reflections, observations) {
+  if (reflections.length === 0 && observations.length === 0) return "";
   const parts = [CONTEXT_USAGE_INSTRUCTIONS];
-  if (keptReflections.length > 0) {
+  if (reflections.length > 0) {
     parts.push(`## Reflections
-${keptReflections.map(reflectionToSummaryLine).join("\n")}`);
+${reflections.map(reflectionToSummaryLine).join("\n")}`);
   }
-  if (keptObservations.length > 0) {
+  if (observations.length > 0) {
     parts.push(`## Observations
-${keptObservations.map(observationToSummaryLine).join("\n")}`);
+${observations.map(observationToSummaryLine).join("\n")}`);
   }
-  if (omittedReflections > 0 || omittedObservations > 0) {
-    const omitted = [];
-    if (omittedReflections > 0) omitted.push(`${omittedReflections} older reflection${omittedReflections === 1 ? "" : "s"}`);
-    if (omittedObservations > 0) omitted.push(`${omittedObservations} older observation${omittedObservations === 1 ? "" : "s"}`);
-    parts.push(`(${omitted.join(" and ")} omitted to fit the summary budget; they remain in the session memory ledger, see /om:view full.)`);
-  }
-  return {
-    text: parts.join("\n\n"),
-    reflections: keptReflections,
-    observations: keptObservations,
-    omittedReflections,
-    omittedObservations
-  };
-}
-var NO_MEMORY_NOTICE = "No observational memory was recorded for this session before this compaction; the earlier context is not summarized.";
-var FALLBACK_HEADER = "Observational memory (model-free fallback summary; no memory model was used).";
-var EXCERPT_MAX_CHARS = 200;
-var FALLBACK_EXCERPT_SHARE = 0.4;
-var OMITTED_EXCERPTS_NOTE_TOKENS = 12;
-var MIN_TRUNCATED_RECORD_TOKENS = 16;
-function describeUnobservedSpan(span) {
-  return `${span.entryCount} source entr${span.entryCount === 1 ? "y" : "ies"} (~${span.tokens.toLocaleString()} tokens)`;
-}
-function blockTokens(text) {
-  return estimateTokens(text) + 1;
-}
-function truncateToTokens(text, tokens) {
-  if (estimateTokens(text) <= tokens) return text;
-  return `${text.slice(0, Math.max(0, tokens * 4 - 1)).trimEnd()}\u2026`;
-}
-function selectTruncatedLines(records, line, budget) {
-  const cap = Math.min(budget, Math.max(MIN_TRUNCATED_RECORD_TOKENS, Math.floor(budget / 2)));
-  const picked = [];
-  let tokens = 0;
-  if (cap <= 0) return { lines: picked, tokens };
-  for (let i = records.length - 1; i >= 0; i--) {
-    const text = truncateToTokens(line(records[i]), cap);
-    const cost = blockTokens(text);
-    if (tokens + cost > budget) continue;
-    tokens += cost;
-    picked.push(text);
-  }
-  return { lines: picked.reverse(), tokens };
-}
-function textOfContent(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const texts = [];
-  for (const block of content) {
-    if (typeof block === "object" && block !== null && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") {
-      texts.push(block.text);
-    }
-  }
-  return texts.join(" ");
-}
-function entryExcerptSource(entry) {
-  if (entry.type === "message") {
-    const message = entry.message;
-    if (typeof message === "object" && message !== null && "role" in message && message.role === "user" && "content" in message) {
-      return textOfContent(message.content);
-    }
-    return void 0;
-  }
-  if (entry.type === "custom_message") return textOfContent(entry.content);
-  if (entry.type === "branch_summary") return typeof entry.summary === "string" ? entry.summary : void 0;
-  return void 0;
-}
-function excerptOf(text) {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > EXCERPT_MAX_CHARS ? `${flat.slice(0, EXCERPT_MAX_CHARS).trimEnd()}\u2026` : flat;
-}
-function pickNewestExcerpts(lines, budget) {
-  const picked = [];
-  let tokens = 0;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const cost = estimateTokens(lines[i]) + 1;
-    if (tokens + cost > budget) break;
-    tokens += cost;
-    picked.push(lines[i]);
-  }
-  return picked.reverse();
-}
-function renderFallbackSummary(entries, foldThroughEntryId, opts) {
-  const projection = buildCompactionProjection(entries, foldThroughEntryId, {
-    observationsPoolMaxTokens: opts.observationsPoolMaxTokens ?? Number.POSITIVE_INFINITY
-  });
-  const foldIndex = entryIndexForId(entries, foldThroughEntryId);
-  const gap = foldIndex === -1 ? void 0 : unobservedSourceSpanBefore(entries, foldIndex);
-  const hasLedger = projection.reflections.length + projection.observations.length > 0;
-  let budget = opts.maxTokens - blockTokens(FALLBACK_HEADER);
-  if (!hasLedger) budget -= blockTokens(NO_MEMORY_NOTICE);
-  let unobserved = [];
-  if (gap) {
-    const notice = `${describeUnobservedSpan(gap)} before this point were never observed, so no memory record describes them and they are no longer in context.`;
-    budget -= blockTokens(notice);
-    const candidates = [];
-    for (let i = gap.firstIndex; i <= gap.lastIndex; i++) {
-      if (!isSourceEntry(entries[i])) continue;
-      const text = excerptOf(entryExcerptSource(entries[i]) ?? "");
-      if (text) candidates.push(`- ${text}`);
-    }
-    const excerptBudget = Math.floor(Math.max(0, budget) * FALLBACK_EXCERPT_SHARE);
-    let excerpts = pickNewestExcerpts(candidates, excerptBudget);
-    if (excerpts.length < candidates.length) excerpts = pickNewestExcerpts(candidates, excerptBudget - OMITTED_EXCERPTS_NOTE_TOKENS);
-    const lines = [notice];
-    if (excerpts.length > 0) lines.push(`Excerpts of the unobserved input:
-${excerpts.join("\n")}`);
-    if (excerpts.length < candidates.length) {
-      const omitted = candidates.length - excerpts.length;
-      lines.push(`(${omitted} more unobserved input${omitted === 1 ? "" : "s"} not shown.)`);
-    }
-    unobserved = lines;
-    budget -= blockTokens(lines.slice(1).join("\n"));
-  }
-  const parts = [FALLBACK_HEADER];
-  if (hasLedger) {
-    const sectionBudget = Math.max(0, budget - blockTokens("## Reflections") - blockTokens("## Observations"));
-    const reserved = selectTruncatedLines(projection.observations, observationToSummaryLine, Math.floor(sectionBudget * SUMMARY_OBSERVATIONS_MIN_SHARE));
-    const reflectionLines = selectTruncatedLines(projection.reflections, reflectionToSummaryLine, sectionBudget - reserved.tokens);
-    const observationLines = selectTruncatedLines(projection.observations, observationToSummaryLine, sectionBudget - reflectionLines.tokens);
-    if (reflectionLines.lines.length > 0) parts.push(`## Reflections
-${reflectionLines.lines.join("\n")}`);
-    if (observationLines.lines.length > 0) parts.push(`## Observations
-${observationLines.lines.join("\n")}`);
-  } else {
-    parts.push(NO_MEMORY_NOTICE);
-  }
-  parts.push(...unobserved);
-  return truncateToTokens(parts.join("\n\n"), opts.maxTokens);
+  return parts.join("\n\n");
 }
 
 // src/session-ledger/worker-memory.ts
@@ -8458,292 +8282,44 @@ Warning: failed to copy /om:view output to clipboard.`,
 }
 
 // src/hooks/compaction-hook.ts
-import {
-  sessionEntryToContextMessages
-} from "@earendil-works/pi-coding-agent";
-
-// src/config.ts
-var import_yaml = __toESM(require_dist(), 1);
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-var DEFAULTS = {
-  observeAfterTokens: 1e4,
-  reflectAfterTokens: 2e4,
-  observationsPoolMaxTokens: 2e4,
-  observationsPoolTargetTokens: 1e4,
-  agentMaxTurns: 16,
-  agentMaxTokens: 32e3,
-  compactionCatchUpMaxChunks: 2,
-  compactionMaxRetainedTokens: 3e4,
-  compactionSummaryMaxTokens: 25e3,
-  model: "@smol",
-  showWorkerNotifications: true,
-  passive: false,
-  debugLog: false
-};
-var WORKER_THINKING_LEVEL = "low";
-var COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 25e3;
-var COMPACTION_RETAINED_CONTEXT_RATIO = 0.125;
-function resolveCompactionMaxRetainedTokens(config, contextWindow) {
-  if (config.compactionMaxRetainedTokens !== void 0 && config.compactionMaxRetainedTokens > 0) {
-    return config.compactionMaxRetainedTokens;
-  }
-  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-    return Math.max(1, Math.floor(contextWindow * COMPACTION_RETAINED_CONTEXT_RATIO));
-  }
-  return COMPACTION_RETAINED_FALLBACK_MAX_TOKENS;
+var DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 2e4;
+function observationsPoolMaxTokens(runtime) {
+  const value = runtime.config.observationsPoolMaxTokens;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS;
 }
-var COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS = 8e3;
-var COMPACTION_SUMMARY_CONTEXT_RATIO = 0.125;
-function resolveCompactionSummaryMaxTokens(config, contextWindow) {
-  if (config.compactionSummaryMaxTokens !== void 0 && config.compactionSummaryMaxTokens > 0) {
-    return config.compactionSummaryMaxTokens;
-  }
-  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-    return Math.max(1, Math.floor(contextWindow * COMPACTION_SUMMARY_CONTEXT_RATIO));
-  }
-  return COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS;
-}
-var WORKER_MEMORY_FALLBACK_MAX_TOKENS = 16e3;
-var WORKER_MEMORY_CONTEXT_RATIO = 0.25;
-function resolveWorkerMemoryMaxTokens(config, contextWindow) {
-  if (config.workerMemoryMaxTokens !== void 0 && config.workerMemoryMaxTokens > 0) return config.workerMemoryMaxTokens;
-  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-    return Math.max(1, Math.floor(contextWindow * WORKER_MEMORY_CONTEXT_RATIO));
-  }
-  return WORKER_MEMORY_FALLBACK_MAX_TOKENS;
-}
-var OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 6e4;
-var OBSERVER_CHUNK_MIN_TOKENS = 256;
-var OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
-function resolveObserverChunkMaxTokens(config, contextWindow) {
-  if (config.observerChunkMaxTokens !== void 0 && config.observerChunkMaxTokens > 0) {
-    return Math.max(OBSERVER_CHUNK_MIN_TOKENS, config.observerChunkMaxTokens);
-  }
-  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-    return Math.max(
-      OBSERVER_CHUNK_MIN_TOKENS,
-      Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO)
-    );
-  }
-  return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
-}
-var CONFIG_FILE = "omp-om.yml";
-var LEGACY_CONFIG_FILE = "omp-om.json";
-var DEFAULT_CONFIG_YAML = `# omp-om settings. Every key is optional; delete a line to get its default.
-# A project file at <project>/.omp/omp-om.yml is merged over this one.
-
-# Memory model for observer, reflector and dropper: provider/id, a bare id,
-# or a role alias such as @smol.
-model: "@smol"
-
-# Run the observer when this many tokens of conversation are unobserved.
-observeAfterTokens: 10000
-# Run the reflector when this many tokens of observations are unreflected.
-reflectAfterTokens: 20000
-# Keep observeAfterTokens < reflectAfterTokens < omp's compaction threshold.
-
-# Active observation budget; reaching it makes compaction a full fold.
-observationsPoolMaxTokens: 20000
-# Size the dropper trims toward (default: half of observationsPoolMaxTokens).
-# observationsPoolTargetTokens: 10000
-
-# Turn cap and output token request for each worker loop.
-agentMaxTurns: 16
-agentMaxTokens: 32000
-
-# Observer chunks allowed synchronously before a compaction; 0 disables.
-compactionCatchUpMaxChunks: 2
-
-# Most unobserved conversation a compaction may keep past omp's cut. Keep it
-# well under omp's compaction threshold so a compaction cannot re-trigger itself.
-compactionMaxRetainedTokens: 30000
-
-# Largest memory summary a compaction renders. Fixed rather than scaled to the
-# window so it stays under omp's threshold on 1M-window models too.
-compactionSummaryMaxTokens: 25000
-
-# Derived from the model's context window when unset:
-# observerChunkMaxTokens: 60000
-# workerMemoryMaxTokens: 16000
-
-showWorkerNotifications: true
-# Turn off the automatic workers; commands and the compaction hook stay active.
-passive: false
-debugLog: false
-`;
-var PASSIVE_ENV = "OMP_OM_PASSIVE";
-var REMOVED_KEYS = [
-  "compactAfterTokens",
-  "compactAfterTokensMode",
-  "compactAfterTokensRatio",
-  "consolidateWhenIdle",
-  "fallbackModel"
-];
-function positiveIntegerOrUndefined(value) {
-  return Number.isInteger(value) && typeof value === "number" && value > 0 ? value : void 0;
-}
-function validTargetOrUndefined(value, maxTokens) {
-  const target = positiveIntegerOrUndefined(value);
-  return target !== void 0 && target < maxTokens ? target : void 0;
-}
-function derivedObservationPoolTarget(maxTokens) {
-  return Math.floor(maxTokens / 2);
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null;
-}
-function nonEmptyString(value) {
-  return typeof value === "string" && value.length > 0 ? value : void 0;
-}
-function normalizeSettingsConfig(path, value, warnings) {
-  const normalized = {};
-  const numberKeys = [
-    "observeAfterTokens",
-    "reflectAfterTokens",
-    "observerChunkMaxTokens",
-    "compactionMaxRetainedTokens",
-    "compactionSummaryMaxTokens",
-    "workerMemoryMaxTokens",
-    "observationsPoolMaxTokens",
-    "observationsPoolTargetTokens",
-    "agentMaxTurns",
-    "agentMaxTokens"
-  ];
-  for (const key of numberKeys) {
-    const normalizedValue = positiveIntegerOrUndefined(value[key]);
-    if (normalizedValue !== void 0) normalized[key] = normalizedValue;
-  }
-  if (Number.isInteger(value.compactionCatchUpMaxChunks) && value.compactionCatchUpMaxChunks >= 0) {
-    normalized.compactionCatchUpMaxChunks = value.compactionCatchUpMaxChunks;
-  }
-  if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
-  if (typeof value.passive === "boolean") normalized.passive = value.passive;
-  if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
-  if (value.model !== void 0) {
-    const model = nonEmptyString(value.model);
-    if (model) normalized.model = model;
-    else warnings.push(`${path}: "model" must be a non-empty string such as "@smol" or "provider/id"; ignored`);
-  }
-  for (const key of REMOVED_KEYS) {
-    if (key in value) warnings.push(`${path}: "${key}" is no longer supported; ignored`);
-  }
-  return normalized;
-}
-function readEnvConfig(env = process.env) {
-  const rawPassive = env[PASSIVE_ENV];
-  if (rawPassive === void 0) return {};
-  const passive = rawPassive.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(passive)) return { passive: true };
-  if (["0", "false", "no", "off"].includes(passive)) return { passive: false };
-  return {};
-}
-function readConfigFile(path, warnings) {
-  if (!existsSync(path)) return {};
-  let raw;
-  try {
-    raw = (0, import_yaml.parse)(readFileSync(path, "utf-8"));
-  } catch (error) {
-    warnings.push(`${path}: ${error instanceof Error ? error.message : String(error)}; using defaults for this file`);
-    return {};
-  }
-  if (raw === null || raw === void 0) return {};
-  if (!isRecord(raw) || Array.isArray(raw)) {
-    warnings.push(`${path}: expected a YAML mapping of keys to values; using defaults for this file`);
-    return {};
-  }
-  return normalizeSettingsConfig(path, raw, warnings);
-}
-function warnLegacyConfig(dir, warnings) {
-  const legacy = join(dir, LEGACY_CONFIG_FILE);
-  if (existsSync(legacy)) {
-    warnings.push(`${legacy}: omp-om now reads ${CONFIG_FILE}; move these settings there and delete this file`);
-  }
-}
-function ensureGlobalConfig(agentDir) {
-  const path = join(agentDir, CONFIG_FILE);
-  if (existsSync(path) || existsSync(join(agentDir, LEGACY_CONFIG_FILE))) return [];
-  try {
-    mkdirSync(agentDir, { recursive: true });
-    writeFileSync(path, DEFAULT_CONFIG_YAML, { encoding: "utf-8", flag: "wx" });
-    return [];
-  } catch (error) {
-    if (error.code === "EEXIST") return [];
-    return [`${path}: could not create default settings file: ${error instanceof Error ? error.message : String(error)}`];
-  }
-}
-function loadConfig(cwd, agentDir, env = process.env) {
-  const warnings = [];
-  warnLegacyConfig(agentDir, warnings);
-  warnLegacyConfig(join(cwd, ".omp"), warnings);
-  const globalConfig = readConfigFile(join(agentDir, CONFIG_FILE), warnings);
-  const projectConfig = readConfigFile(join(cwd, ".omp", CONFIG_FILE), warnings);
-  const envConfig = readEnvConfig(env);
-  const merged = {
-    ...DEFAULTS,
-    observationsPoolTargetTokens: void 0,
-    ...globalConfig,
-    ...projectConfig,
-    ...envConfig
-  };
-  const target = validTargetOrUndefined(
-    merged.observationsPoolTargetTokens,
-    merged.observationsPoolMaxTokens
-  ) ?? derivedObservationPoolTarget(merged.observationsPoolMaxTokens);
-  return { config: { ...merged, observationsPoolTargetTokens: target }, warnings };
-}
-
-// src/debug-log.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, renameSync, statSync, unlinkSync, appendFileSync } from "node:fs";
-import { dirname, join as join2 } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-var DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024;
-var DEBUG_LOG_RELATIVE_PATH = join2("observational-memory", "debug.ndjson");
-var DEBUG_LOG_SESSION_DIR_RELATIVE_PATH = join2("observational-memory", "debug");
-var storage = new AsyncLocalStorage();
-function withDebugLogContext(context, fn) {
-  const parent = storage.getStore();
-  return storage.run({ ...parent, ...context }, fn);
-}
-function safeDebugLogSessionId(sessionId) {
-  const trimmed = sessionId?.trim();
-  if (!trimmed) return void 0;
-  const sanitized = trimmed.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 128);
-  if (!/[A-Za-z0-9]/.test(sanitized)) return void 0;
-  return sanitized;
-}
-function debugLogRelativePath(context) {
-  const safeSessionId = safeDebugLogSessionId(context.sessionId);
-  return safeSessionId ? join2(DEBUG_LOG_SESSION_DIR_RELATIVE_PATH, `${safeSessionId}.ndjson`) : DEBUG_LOG_RELATIVE_PATH;
-}
-function debugLog(event, data = {}) {
-  const context = storage.getStore();
-  if (context?.enabled !== true) return;
-  try {
-    const path = join2(getAgentDir(), debugLogRelativePath(context));
-    mkdirSync2(dirname(path), { recursive: true });
-    rotateIfNeeded(path);
-    const payload = {
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      event,
-      cwd: context.cwd,
-      sessionId: context.sessionId,
-      sessionFile: context.sessionFile,
-      runId: context.runId,
-      data
-    };
-    appendFileSync(path, `${JSON.stringify(payload)}
-`, "utf-8");
-  } catch {
-  }
-}
-function rotateIfNeeded(path) {
-  if (!existsSync2(path)) return;
-  if (statSync(path).size < DEBUG_LOG_MAX_BYTES) return;
-  const backupPath = `${path}.1`;
-  if (existsSync2(backupPath)) unlinkSync(backupPath);
-  renameSync(path, backupPath);
+function registerCompactionHook(pi, runtime) {
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (runtime.compactHookInFlight) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          "Observational memory: another compaction is already in progress; cancelling duplicate",
+          "warning"
+        );
+      }
+      return { cancel: true };
+    }
+    runtime.compactHookInFlight = true;
+    try {
+      runtime.ensureConfig(ctx.cwd);
+      const { preparation, branchEntries } = event;
+      const { firstKeptEntryId, tokensBefore } = preparation;
+      const projection = buildCompactionProjection(branchEntries, firstKeptEntryId, {
+        observationsPoolMaxTokens: observationsPoolMaxTokens(runtime)
+      });
+      const summary = renderSummary(projection.reflections, projection.observations);
+      if (summary.length === 0) return;
+      return {
+        compaction: {
+          summary,
+          firstKeptEntryId,
+          tokensBefore,
+          details: projection.details
+        }
+      };
+    } finally {
+      runtime.compactHookInFlight = false;
+    }
+  });
 }
 
 // src/agents/agent-loop.ts
@@ -8782,13 +8358,66 @@ function createTurnCap(maxTurns, parent) {
   };
 }
 
-// src/agents/observer/agent.ts
+// src/agents/dropper/agent.ts
 import { Type } from "@earendil-works/pi-ai";
 
-// src/ids.ts
-import { createHash } from "node:crypto";
-function hashId(content) {
-  return createHash("sha256").update(content).digest("hex").slice(0, 12);
+// src/debug-log.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync, mkdirSync, renameSync, statSync, unlinkSync, appendFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+var DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024;
+var DEBUG_LOG_RELATIVE_PATH = join("observational-memory", "debug.ndjson");
+var DEBUG_LOG_SESSION_DIR_RELATIVE_PATH = join("observational-memory", "debug");
+var storage = new AsyncLocalStorage();
+function withDebugLogContext(context, fn) {
+  const parent = storage.getStore();
+  return storage.run({ ...parent, ...context }, fn);
+}
+function safeDebugLogSessionId(sessionId) {
+  const trimmed = sessionId?.trim();
+  if (!trimmed) return void 0;
+  const sanitized = trimmed.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 128);
+  if (!/[A-Za-z0-9]/.test(sanitized)) return void 0;
+  return sanitized;
+}
+function debugLogRelativePath(context) {
+  const safeSessionId = safeDebugLogSessionId(context.sessionId);
+  return safeSessionId ? join(DEBUG_LOG_SESSION_DIR_RELATIVE_PATH, `${safeSessionId}.ndjson`) : DEBUG_LOG_RELATIVE_PATH;
+}
+function debugLog(event, data = {}) {
+  const context = storage.getStore();
+  if (context?.enabled !== true) return;
+  try {
+    const path = join(getAgentDir(), debugLogRelativePath(context));
+    mkdirSync(dirname(path), { recursive: true });
+    rotateIfNeeded(path);
+    const payload = {
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      event,
+      cwd: context.cwd,
+      sessionId: context.sessionId,
+      sessionFile: context.sessionFile,
+      runId: context.runId,
+      data
+    };
+    appendFileSync(path, `${JSON.stringify(payload)}
+`, "utf-8");
+  } catch {
+  }
+}
+function rotateIfNeeded(path) {
+  if (!existsSync(path)) return;
+  if (statSync(path).size < DEBUG_LOG_MAX_BYTES) return;
+  const backupPath = `${path}.1`;
+  if (existsSync(backupPath)) unlinkSync(backupPath);
+  renameSync(path, backupPath);
+}
+
+// src/model-budget.ts
+var AGENT_LOOP_MAX_TOKENS = 32e3;
+function boundedMaxTokens(model, requested = AGENT_LOOP_MAX_TOKENS) {
+  return typeof model.maxTokens === "number" && model.maxTokens > 0 ? Math.min(model.maxTokens, requested) : requested;
 }
 
 // src/agents/stream-errors.ts
@@ -8803,10 +8432,363 @@ function logAgentStreamError(stage, event) {
   });
 }
 
-// src/model-budget.ts
-var AGENT_LOOP_MAX_TOKENS = 32e3;
-function boundedMaxTokens(model, requested = AGENT_LOOP_MAX_TOKENS) {
-  return typeof model.maxTokens === "number" && model.maxTokens > 0 ? Math.min(model.maxTokens, requested) : requested;
+// src/agents/dropper/prompts.ts
+var DROPPER_SYSTEM = `You are the dropper agent for a coding assistant.
+
+These records are the ONLY information the assistant will have about past interactions once the raw conversation is compacted out of context. Dropping the wrong observation can make future work repeat, contradict, or misremember the user. Take this seriously.
+
+Your job is to identify only the safest active observations to remove from compacted memory by calling drop_observations with their ids. Default action is KEEP. When uncertain, keep the observation.
+
+Active-memory framing. Dropping an observation removes it from active compacted memory; it does not erase the ledger history or source evidence. Still, future compressed context will no longer show the observation, so only drop it when its durable meaning is safely captured elsewhere or it is genuinely low-signal and carries no unique future value.
+
+The user message includes the active observation pool target and "Maximum drops allowed this run". The maximum is a hard upper bound sized to move the pool toward the target if every proposed drop is clearly safe. It is not a target. Do not try to fill it. Drop fewer or none when fewer observations are safely removable. When the active pool is far over target, make a thorough pass over safe candidates rather than stopping after a few obvious examples.
+
+What to drop, in priority order:
+- Redundant observations whose durable meaning is already captured by current reflections with equivalent fidelity.
+- Superseded observations where a later observation clearly replaces the older state.
+- Repeated routine tool acknowledgements or low-signal progress updates that do not carry decisions, constraints, exact errors, or user-specific facts.
+- Older observations that no longer carry working context and are covered by a reflection or a newer observation.
+
+Age-gradient rule. Recent observations carry working context the assistant may still need; older observations have usually been summarized elsewhere or are no longer load-bearing. Prefer older safe drops before newer working context, but age alone is not enough to drop important or uniquely load-bearing observations.
+
+Reflection coverage guidance. Each observation line includes [coverage: none|partial|strong]. Coverage is evidence, not an automatic decision:
+- none: no current reflection cites this observation id. Be cautious, especially for high or critical observations.
+- partial: one current reflection cites this observation id. Compare the observation to the reflection before dropping.
+- strong: two or more current reflections cite this observation id. This is stronger evidence that the durable meaning is preserved, but you must still keep uniquely load-bearing or uncertain observations.
+
+Relevance guidance. Relevance is importance/resistance, not an absolute keep/drop lock:
+- low: consider first, but drop only when it carries no unique detail, decision, state, error, identifier, or user-specific fact.
+- medium: drop when redundant with reflections or other observations, or when the work state is clearly obsolete.
+- high: drop only when clearly superseded or already captured by a reflection with equivalent fidelity.
+- critical: highest importance and strongest resistance. Do not drop fresh or uniquely load-bearing critical observations. Critical observations may be dropped only with strong semantic evidence such as age plus partial/strong reflection coverage, supersession by newer memory, redundancy, or clear obsolescence.
+
+User assertions and concrete completions must be preserved unless a current reflection or newer observation preserves the exact assertion/completion and its important details with equivalent fidelity.
+
+Preservation floor. Regardless of relevance label, budget pressure, coverage, or age, do not drop observations that uniquely carry any of the following:
+- User preferences, constraints, corrections, or identity/role facts.
+- Concrete completions that future runs must not redo.
+- Named identifiers, file paths, function names, package names, tickets, commit SHAs, handles, or exact commands.
+- Exact error messages, diagnostic output, or test failure names.
+- Architectural or technical decisions and their rationale.
+- Dates of specific events, deadlines, meetings, migrations, or incidents.
+- Current unresolved blockers, TODOs, partial work, or decisions waiting on the user.
+- Non-standard user terminology or unusual phrasing needed for future recognition.
+
+What you cannot do:
+- You cannot merge observations.
+- You cannot rewrite or edit observations.
+- You cannot add new observations or reflections.
+- You can only call drop_observations with ids from the current observations list.
+
+Do not force drops you do not believe in. If no observations are safe to drop, do not call the tool and reply briefly. Hitting the budget or maximum count is less important than preserving load-bearing memory.`;
+
+// src/agents/dropper/coverage.ts
+var REFLECTION_COVERAGE_DROP_RANK = {
+  strong: 0,
+  partial: 1,
+  none: 2
+};
+function reflectionSupportCounts(reflections) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const reflection of reflections) {
+    const uniqueIds = new Set(reflection.supportingObservationIds);
+    for (const id of uniqueIds) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
+}
+function reflectionCoverageTierForCount(count) {
+  if (count <= 0) return "none";
+  if (count === 1) return "partial";
+  return "strong";
+}
+function reflectionCoverageMap(observations, reflections) {
+  const counts = reflectionSupportCounts(reflections);
+  return new Map(observations.map((observation) => [
+    observation.id,
+    reflectionCoverageTierForCount(counts.get(observation.id) ?? 0)
+  ]));
+}
+function emptyCoverageBucket() {
+  return {
+    none: { count: 0, tokens: 0 },
+    partial: { count: 0, tokens: 0 },
+    strong: { count: 0, tokens: 0 }
+  };
+}
+function emptyCoverageSummaryByRelevance() {
+  return {
+    low: emptyCoverageBucket(),
+    medium: emptyCoverageBucket(),
+    high: emptyCoverageBucket(),
+    critical: emptyCoverageBucket()
+  };
+}
+function summarizeCoverageByRelevance(observations, coverageById) {
+  const summary = emptyCoverageSummaryByRelevance();
+  for (const observation of observations) {
+    const tier = coverageById.get(observation.id) ?? "none";
+    const bucket = summary[observation.relevance][tier];
+    bucket.count++;
+    bucket.tokens += observation.tokenCount;
+  }
+  return summary;
+}
+function summarizeCoverageByRelevanceForIds(ids, observations, coverageById) {
+  const byId = new Map(observations.map((observation) => [observation.id, observation]));
+  const selected = ids.flatMap((id) => {
+    const observation = byId.get(id);
+    return observation ? [observation] : [];
+  });
+  return summarizeCoverageByRelevance(selected, coverageById);
+}
+function emptyCoverageTransitionSummaryByRelevance() {
+  return {
+    low: {},
+    medium: {},
+    high: {},
+    critical: {}
+  };
+}
+function summarizeCoverageTransitionsByRelevance(observations, beforeCoverageById, afterCoverageById) {
+  const summary = emptyCoverageTransitionSummaryByRelevance();
+  for (const observation of observations) {
+    const before = beforeCoverageById.get(observation.id) ?? "none";
+    const after = afterCoverageById.get(observation.id) ?? "none";
+    if (before === after) continue;
+    const key = `${before}->${after}`;
+    const bucket = summary[observation.relevance][key] ?? { count: 0, tokens: 0 };
+    bucket.count++;
+    bucket.tokens += observation.tokenCount;
+    summary[observation.relevance][key] = bucket;
+  }
+  return summary;
+}
+function observationToDropperLine(observation, coverage) {
+  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] [coverage: ${coverage}] ${observation.content}`;
+}
+function coverageTierForObservation(observation, coverageById) {
+  return coverageById.get(observation.id) ?? "none";
+}
+
+// src/agents/dropper/agent.ts
+var DropperStreamError = class extends Error {
+  stopReason;
+  constructor(stopReason, errorMessage2) {
+    super(`dropper stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
+    this.name = "DropperStreamError";
+    this.stopReason = stopReason;
+  }
+};
+var RELEVANCE_DROP_RANK = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3
+};
+var DropObservationsSchema = Type.Object({
+  ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+  reason: Type.Optional(Type.String())
+});
+function joinOrEmpty(items) {
+  return items.length ? items.join("\n") : "(none yet)";
+}
+function relevanceCounts(observations) {
+  return observations.reduce((counts, observation) => {
+    counts[observation.relevance]++;
+    return counts;
+  }, { low: 0, medium: 0, high: 0, critical: 0 });
+}
+function timestampRank(timestamp) {
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+}
+function selectDropCandidates(ids, observations, maxDrops, reflections = []) {
+  if (maxDrops <= 0 || ids.length === 0) return [];
+  const byId = new Map(observations.map((observation) => [observation.id, observation]));
+  const coverageById = reflectionCoverageMap(observations, reflections);
+  const firstProposalIndex = /* @__PURE__ */ new Map();
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    if (!firstProposalIndex.has(id)) firstProposalIndex.set(id, i);
+  }
+  return Array.from(firstProposalIndex.entries()).map(([id, index]) => ({ id, index, observation: byId.get(id) })).filter(
+    (candidate) => candidate.observation !== void 0
+  ).sort((a, b) => {
+    const coverageDelta = REFLECTION_COVERAGE_DROP_RANK[coverageTierForObservation(a.observation, coverageById)] - REFLECTION_COVERAGE_DROP_RANK[coverageTierForObservation(b.observation, coverageById)];
+    const relevanceDelta = RELEVANCE_DROP_RANK[a.observation.relevance] - RELEVANCE_DROP_RANK[b.observation.relevance];
+    const ageDelta = timestampRank(a.observation.timestamp) - timestampRank(b.observation.timestamp);
+    return coverageDelta || relevanceDelta || ageDelta || a.index - b.index;
+  }).slice(0, maxDrops).map((candidate) => candidate.id);
+}
+async function runDropper(args) {
+  const { model, apiKey, headers, env, reflections, observations, targetTokens, signal } = args;
+  if (observations.length === 0) return void 0;
+  const metrics = observationPoolMetrics(observations, targetTokens);
+  const { observationTokens, fullness, tokensOverTarget, maxDropsAllowed } = metrics;
+  const coverageById = reflectionCoverageMap(observations, reflections);
+  const coverageSummaryByRelevance = summarizeCoverageByRelevance(observations, coverageById);
+  debugLog("dropper.agent_start", {
+    activeObservationCount: observations.length,
+    reflectionCount: reflections.length,
+    observationTokens,
+    targetTokens,
+    tokensOverTarget,
+    fullness,
+    maxDropsAllowed,
+    relevanceCounts: relevanceCounts(observations),
+    coverageSummaryByRelevance
+  });
+  if (maxDropsAllowed <= 0) {
+    debugLog("dropper.result", {
+      reason: "not_over_target",
+      toolCallCount: 0,
+      rawRequestedIdsCount: 0,
+      acceptedCandidateCount: 0,
+      selectedDropsCount: 0,
+      selectedDropTokens: 0,
+      selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds([], observations, coverageById),
+      maxDropsAllowed
+    });
+    return void 0;
+  }
+  const proposedDropIds = [];
+  const proposed = /* @__PURE__ */ new Set();
+  const allowed = new Map(observations.map((observation) => [observation.id, observation]));
+  let toolCallCount = 0;
+  let rawRequestedIdsCount = 0;
+  let missingIdsCount = 0;
+  let criticalCandidateIdsCount = 0;
+  let duplicateInRequestCount = 0;
+  let duplicateInRunCount = 0;
+  const dropObservations = {
+    name: "drop_observations",
+    label: "Drop observations",
+    description: "Propose active observation ids that are safe to remove from compacted memory.",
+    parameters: DropObservationsSchema,
+    execute: async (_id, params) => {
+      toolCallCount++;
+      rawRequestedIdsCount += params.ids.length;
+      const seenInRequest = /* @__PURE__ */ new Set();
+      let added = 0;
+      let requestMissingIds = 0;
+      let requestCriticalCandidateIds = 0;
+      let requestDuplicateIds = 0;
+      let requestDuplicateInRunIds = 0;
+      for (const id of params.ids) {
+        const observation = allowed.get(id);
+        if (!observation) {
+          missingIdsCount++;
+          requestMissingIds++;
+          continue;
+        }
+        if (seenInRequest.has(id)) {
+          duplicateInRequestCount++;
+          requestDuplicateIds++;
+          continue;
+        }
+        seenInRequest.add(id);
+        if (proposed.has(id)) {
+          duplicateInRunCount++;
+          requestDuplicateInRunIds++;
+          continue;
+        }
+        proposed.add(id);
+        proposedDropIds.push(id);
+        if (observation.relevance === "critical") {
+          criticalCandidateIdsCount++;
+          requestCriticalCandidateIds++;
+        }
+        added++;
+      }
+      debugLog("dropper.tool_call", {
+        toolCallCount,
+        rawRequestedIdsCount: params.ids.length,
+        acceptedIdsCount: added,
+        missingIdsCount: requestMissingIds,
+        criticalCandidateIdsCount: requestCriticalCandidateIds,
+        duplicateInRequestCount: requestDuplicateIds,
+        duplicateInRunCount: requestDuplicateInRunIds,
+        totalCandidates: proposedDropIds.length,
+        maxDropsAllowed
+      });
+      return {
+        content: [{ type: "text", text: `Queued ${added} drop candidate${added === 1 ? "" : "s"}. Candidates this run: ${proposedDropIds.length}. Maximum drops allowed: ${maxDropsAllowed}.` }],
+        details: { added, totalCandidates: proposedDropIds.length, maxDropsAllowed }
+      };
+    }
+  };
+  const fullnessPercent = Math.round(fullness * 100);
+  const userText = `CURRENT REFLECTIONS:
+${joinOrEmpty(reflections.map(reflectionToSummaryLine))}
+
+CURRENT OBSERVATIONS:
+${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}
+
+Active observation pool: ~${observationTokens.toLocaleString()} tokens; target: ~${targetTokens.toLocaleString()} tokens; fullness against target: ~${fullnessPercent.toLocaleString()}%; over target by ~${tokensOverTarget.toLocaleString()} tokens.
+Maximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"}. This maximum is sized to move the active pool toward the target if every proposed drop is clearly safe.
+This maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
+  const prompts = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
+  const context = {
+    systemPrompt: [DROPPER_SYSTEM],
+    messages: [],
+    tools: [dropObservations]
+  };
+  const reasoning = model.reasoning;
+  const thinkingLevel = args.thinkingLevel ?? "low";
+  const cap = createTurnCap(args.maxTurns, signal);
+  const config = {
+    model,
+    apiKey,
+    headers,
+    env,
+    maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
+    convertToLlm: (msgs) => msgs,
+    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}
+  };
+  const loop = args.agentLoop ?? agentLoop;
+  const stream = loop(prompts, context, config, cap.signal);
+  let streamError;
+  try {
+    for await (const event of stream) {
+      cap.observe(event);
+      logAgentStreamError("dropper", event);
+      const message = event.message;
+      if (!cap.capped && message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+        streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+      }
+    }
+    await stream.result();
+  } finally {
+    cap.dispose();
+  }
+  if (streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
+  const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
+  const reason = droppedIds.length > 0 ? "selected_nonempty" : toolCallCount === 0 ? "no_tool_call" : proposedDropIds.length === 0 ? "all_filtered" : "selected_empty";
+  const selectedDropTokens = droppedIds.reduce((sum, id) => sum + (allowed.get(id)?.tokenCount ?? 0), 0);
+  debugLog("dropper.result", {
+    reason,
+    toolCallCount,
+    rawRequestedIdsCount,
+    missingIdsCount,
+    criticalCandidateIdsCount,
+    duplicateInRequestCount,
+    duplicateInRunCount,
+    acceptedCandidateCount: proposedDropIds.length,
+    selectedDropsCount: droppedIds.length,
+    selectedDropTokens,
+    selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds(droppedIds, observations, coverageById),
+    maxDropsAllowed
+  });
+  return droppedIds.length > 0 ? droppedIds : void 0;
+}
+
+// src/agents/observer/agent.ts
+import { Type as Type2 } from "@earendil-works/pi-ai";
+
+// src/ids.ts
+import { createHash } from "node:crypto";
+function hashId(content) {
+  return createHash("sha256").update(content).digest("hex").slice(0, 12);
 }
 
 // src/agents/observer/prompts.ts
@@ -9077,9 +9059,9 @@ function serializeSourceAddressedBranchEntries(entries, options = {}) {
     const block = `${label}
 ${rendered}`;
     const separator = blocks.length > 0 ? "\n\n" : "";
-    const blockTokens2 = estimateStringTokens(`${separator}${block}`);
+    const blockTokens = estimateStringTokens(`${separator}${block}`);
     const maxTokens = options.maxTokens;
-    if (maxTokens !== void 0 && estimatedTokens + blockTokens2 > maxTokens) {
+    if (maxTokens !== void 0 && estimatedTokens + blockTokens > maxTokens) {
       if (blocks.length > 0) break;
       const excerpt = truncateSourceBlockToTokenBudget(label, rendered, maxTokens);
       if (!excerpt) break;
@@ -9091,7 +9073,7 @@ ${rendered}`;
     }
     blocks.push(block);
     sourceEntryIds.push(entry.id);
-    estimatedTokens += blockTokens2;
+    estimatedTokens += blockTokens;
   }
   const text = blocks.join("\n\n");
   return { text, sourceEntryIds, estimatedTokens: estimateStringTokens(text), truncatedSourceEntryIds };
@@ -9127,27 +9109,27 @@ function renderRecallSourceEntries(entries) {
 }
 
 // src/agents/observer/agent.ts
-var RelevanceSchema = Type.Union([
-  Type.Literal("low"),
-  Type.Literal("medium"),
-  Type.Literal("high"),
-  Type.Literal("critical")
+var RelevanceSchema = Type2.Union([
+  Type2.Literal("low"),
+  Type2.Literal("medium"),
+  Type2.Literal("high"),
+  Type2.Literal("critical")
 ]);
 var OBSERVATION_TIMESTAMP_PATTERN = "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$";
-var RecordObservationsSchema = Type.Object({
-  observations: Type.Array(
-    Type.Object({
-      timestamp: Type.String({
+var RecordObservationsSchema = Type2.Object({
+  observations: Type2.Array(
+    Type2.Object({
+      timestamp: Type2.String({
         pattern: OBSERVATION_TIMESTAMP_PATTERN,
         description: "Observation time in local 'YYYY-MM-DD HH:MM' format."
       }),
-      content: Type.String({
+      content: Type2.String({
         minLength: 1,
         description: "Single-line plain prose. No markdown, no tags, no embedded timestamp."
       }),
       relevance: RelevanceSchema,
-      sourceEntryIds: Type.Array(
-        Type.String({ minLength: 1 }),
+      sourceEntryIds: Type2.Array(
+        Type2.String({ minLength: 1 }),
         {
           minItems: 1,
           description: "Exact source entry ids from the chunk that directly support this observation. Use only ids shown in '[Source entry id: ...]' labels; never invent ids."
@@ -9159,13 +9141,13 @@ var RecordObservationsSchema = Type.Object({
 });
 var ObserverStreamError = class extends Error {
   stopReason;
-  constructor(stopReason, errorMessage3) {
-    super(`observer stream ended with stopReason "${stopReason}"${errorMessage3 ? `: ${errorMessage3}` : ""}`);
+  constructor(stopReason, errorMessage2) {
+    super(`observer stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
     this.name = "ObserverStreamError";
     this.stopReason = stopReason;
   }
 };
-function joinOrEmpty(items) {
+function joinOrEmpty2(items) {
   return items.length ? items.join("\n") : "(none yet)";
 }
 function normalizeSourceEntryIds(sourceEntryIds, allowedSourceEntryIds) {
@@ -9230,10 +9212,10 @@ async function runObserver(args) {
   const userText = `Current local time: ${now}
 
 CURRENT REFLECTIONS:
-${joinOrEmpty(priorReflections)}
+${joinOrEmpty2(priorReflections)}
 
 CURRENT OBSERVATIONS:
-${joinOrEmpty(priorObservations)}
+${joinOrEmpty2(priorObservations)}
 
 Compress the following new conversation chunk into observations by calling record_observations one or more times. Do not restate facts already present in current reflections or current observations. Prefer inline conversation timestamps when assigning times; fall back to the current local time above only if no message timestamp applies. Stop calling the tool and reply with a short plain-text confirmation once the chunk is fully covered.
 
@@ -9282,721 +9264,6 @@ ${conversation}`;
   if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
   if (accumulated.size === 0) return void 0;
   return Array.from(accumulated.values());
-}
-
-// src/hooks/compaction-catch-up.ts
-async function catchUpObserver(args) {
-  const { pi, runtime, ctx, entries, gap, maxChunks, signal, resolved } = args;
-  const result = { chunksRecorded: 0 };
-  if (maxChunks <= 0) return result;
-  const contextWindow = resolved.model.contextWindow;
-  const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
-  const frontierIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-  let remaining = entries.slice(frontierIndex + 1, gap.lastIndex + 1).filter(isSourceEntry);
-  let branch = entries;
-  for (let chunkIndex = 0; chunkIndex < maxChunks && remaining.length > 0; chunkIndex++) {
-    if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
-    const { text: chunk, sourceEntryIds, estimatedTokens } = serializeSourceAddressedBranchEntries(remaining, { maxTokens: maxChunkTokens });
-    const coversUpToId = sourceEntryIds.at(-1);
-    if (!chunk.trim() || !coversUpToId) break;
-    const fullMemory = fullProjection(branch);
-    const memory = boundWorkerMemory(fullMemory.reflections, fullMemory.observations, resolveWorkerMemoryMaxTokens(runtime.config, contextWindow));
-    if (runtime.config.showWorkerNotifications && ctx.hasUI) {
-      ctx.ui.notify(
-        `Observational memory: observing ${sourceEntryIds.length} unobserved source entr${sourceEntryIds.length === 1 ? "y" : "ies"} (~${estimatedTokens.toLocaleString()} tokens) before compacting`,
-        "info"
-      );
-    }
-    debugLog("compaction.catch_up.chunk", { chunkIndex, sourceEntryCount: sourceEntryIds.length, estimatedTokens, coversUpToId });
-    let observations;
-    try {
-      observations = await runObserver({
-        model: resolved.model,
-        apiKey: resolved.apiKey,
-        headers: resolved.headers,
-        env: resolved.env,
-        priorReflections: memory.reflections.map(reflectionToSummaryLine),
-        priorObservations: memory.observations.map(observationToSummaryLine),
-        chunk,
-        allowedSourceEntryIds: sourceEntryIds,
-        signal,
-        maxTurns: runtime.config.agentMaxTurns,
-        maxOutputTokens: runtime.config.agentMaxTokens,
-        thinkingLevel: WORKER_THINKING_LEVEL
-      });
-    } catch (error) {
-      if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
-      const errorMessage3 = error instanceof Error ? error.message : String(error);
-      debugLog("compaction.catch_up.error", { chunkIndex, errorMessage: errorMessage3 });
-      return { ...result, stoppedBecause: "error", reason: errorMessage3 };
-    }
-    if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
-    runtime.memoryFailureReason = void 0;
-    const data = observations && observations.length > 0 ? buildObservationsRecordedData(observations, coversUpToId) : void 0;
-    if (!data) {
-      debugLog("compaction.catch_up.empty", { chunkIndex, coversUpToId });
-      return { ...result, stoppedBecause: "empty" };
-    }
-    pi.appendEntry(OM_OBSERVATIONS_RECORDED, data);
-    result.chunksRecorded++;
-    debugLog("compaction.catch_up.recorded", { chunkIndex, count: observations.length, coversUpToId });
-    const coveredIndex = entries.findIndex((entry) => entry.id === coversUpToId);
-    remaining = remaining.filter((entry) => entries.indexOf(entry) > coveredIndex);
-    branch = ctx.sessionManager?.getBranch?.() ?? branch;
-  }
-  if (remaining.length > 0 && !result.stoppedBecause) result.stoppedBecause = "max_chunks";
-  return result;
-}
-
-// src/hooks/compaction-hook.ts
-var HOOK_CATCH_UP_DEADLINE_MS = 2e4;
-var HOOK_IN_FLIGHT_WAIT_MS = 15e3;
-var HOOK_CATCH_UP_MIN_MS = 8e3;
-var HOOK_RENDER_MARGIN_MS = 2e3;
-var OBSERVER_PHASE_POLL_MS = 100;
-function observerInFlight(runtime) {
-  return runtime.consolidationInFlight && (runtime.consolidationPhase ?? "observer") === "observer";
-}
-async function waitForInFlightObserver(runtime, signal) {
-  const pending = runtime.consolidationPromise;
-  if (!observerInFlight(runtime) || !pending) return !observerInFlight(runtime);
-  let timer;
-  let poll;
-  let onAbort;
-  const stopped = new Promise((resolve) => {
-    timer = setTimeout(() => resolve(false), HOOK_IN_FLIGHT_WAIT_MS);
-    poll = setInterval(() => {
-      if (!observerInFlight(runtime)) resolve(true);
-    }, OBSERVER_PHASE_POLL_MS);
-    onAbort = () => resolve(false);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-  try {
-    return await Promise.race([pending.then(() => true, () => true), stopped]);
-  } finally {
-    clearTimeout(timer);
-    clearInterval(poll);
-    if (onAbort) signal?.removeEventListener("abort", onAbort);
-  }
-}
-var DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 2e4;
-function observationsPoolMaxTokens(runtime) {
-  const value = runtime.config.observationsPoolMaxTokens;
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS;
-}
-var CUT_POINT_ROLES = /* @__PURE__ */ new Set(["user", "assistant", "bashExecution", "custom", "branchSummary", "compactionSummary"]);
-function isCutPointEntry(entry) {
-  if (entry.type === "compaction") return false;
-  try {
-    return sessionEntryToContextMessages(entry).some((message) => CUT_POINT_ROLES.has(message.role));
-  } catch {
-    return false;
-  }
-}
-function findCutPointAtOrBefore(entries, index, startIndex) {
-  for (let i = Math.min(index, entries.length - 1); i >= startIndex && i >= 0; i--) {
-    if (isCutPointEntry(entries[i])) return i;
-  }
-  return -1;
-}
-function resolveCompactionCut(entries, firstKeptEntryId, options) {
-  const piCut = { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId };
-  const cutIndex = entryIndexForId(entries, firstKeptEntryId);
-  if (cutIndex === -1) return { kind: "cut", cut: piCut };
-  const gap = unobservedSourceSpanBefore(entries, cutIndex);
-  if (!gap) return { kind: "cut", cut: piCut };
-  const coverageMarkerId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
-  if (!coverageMarkerId) return { kind: "fallback", cut: piCut, reason: "no observation coverage", gap };
-  const rangeStart = compactionRangeStartIndex(entries);
-  const coverageIndex2 = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-  const nothingObserved = { kind: "fallback", cut: piCut, reason: "nothing observed can be compacted", gap };
-  if (coverageIndex2 < rangeStart) return nothingObserved;
-  const safeCutIndex = findCutPointAtOrBefore(entries, gap.firstIndex, rangeStart);
-  if (safeCutIndex <= rangeStart) return nothingObserved;
-  const freedTokens = rawTokensAfterIndex(entries, rangeStart - 1) - rawTokensAfterIndex(entries, safeCutIndex - 1);
-  if (freedTokens <= 0) return nothingObserved;
-  const retainedTokens = rawTokensAfterIndex(entries, safeCutIndex - 1);
-  if (retainedTokens > options.maxRetainedTokens) {
-    return {
-      kind: "fallback",
-      cut: piCut,
-      reason: `retaining ~${retainedTokens.toLocaleString()} tokens exceeds the ~${options.maxRetainedTokens.toLocaleString()}-token budget`,
-      gap
-    };
-  }
-  return {
-    kind: "cut",
-    cut: { firstKeptEntryId: entries[safeCutIndex].id, foldThroughEntryId: coverageMarkerId },
-    gap,
-    retainedTokens
-  };
-}
-function warn(ctx, message) {
-  notify(ctx, message, "warning");
-}
-function notify(ctx, message, level) {
-  if (!ctx.hasUI) return;
-  try {
-    ctx.ui.notify(message, level);
-  } catch {
-  }
-}
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-function debugContext(runtime, ctx) {
-  let sessionId;
-  let sessionFile;
-  try {
-    const manager = ctx.sessionManager;
-    sessionId = manager?.getSessionId?.();
-    sessionFile = manager?.getSessionFile?.();
-  } catch {
-  }
-  return {
-    enabled: runtime.config.debugLog === true,
-    cwd: ctx.cwd,
-    sessionId,
-    sessionFile,
-    runId: `compaction-${Date.now().toString(36)}`
-  };
-}
-function delegateCompaction(ctx, runtime, reason) {
-  runtime.memoryFailureReason = reason;
-  warn(ctx, `Observational memory: ${reason}. Memory updates are unavailable; using omp's normal compaction.`);
-  return void 0;
-}
-async function withCompactionDeadline(signal, ctx, runtime, work) {
-  const controller = new AbortController();
-  let interrupt;
-  const interrupted = new Promise((resolve) => {
-    interrupt = resolve;
-  });
-  const onAbort = () => {
-    interrupt({ cancel: true });
-    controller.abort();
-  };
-  const timer = setTimeout(() => {
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-    interrupt(delegateCompaction(ctx, runtime, `memory work reached the ${HOOK_CATCH_UP_DEADLINE_MS / 1e3}s hook deadline`));
-    controller.abort();
-  }, HOOK_CATCH_UP_DEADLINE_MS);
-  signal?.addEventListener("abort", onAbort, { once: true });
-  try {
-    if (signal?.aborted) {
-      onAbort();
-      return { cancel: true };
-    }
-    return await Promise.race([interrupted, work(controller.signal)]);
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-async function handleCompaction(pi, event, ctx, runtime) {
-  const startedAt = Date.now();
-  if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
-  const resolved = await runtime.resolveModel(ctx);
-  if (event.signal?.aborted) return { cancel: true };
-  if (!resolved.ok) return delegateCompaction(ctx, runtime, `memory model unavailable: ${resolved.reason}`);
-  if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
-  const { preparation, branchEntries } = event;
-  const { firstKeptEntryId, tokensBefore } = preparation;
-  let entries = branchEntries;
-  const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
-  const maxRetainedTokens = resolveCompactionMaxRetainedTokens(runtime.config, contextWindow);
-  const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
-  const poolMaxTokens = observationsPoolMaxTokens(runtime);
-  let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
-  if (resolution.gap && observerInFlight(runtime)) {
-    const settled = await waitForInFlightObserver(runtime, event.signal);
-    if (event.signal?.aborted) return { cancel: true };
-    debugLog("compaction.in_flight_wait", { settled, phase: runtime.consolidationPhase });
-    if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
-    entries = ctx.sessionManager.getBranch();
-    resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
-  }
-  if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !observerInFlight(runtime) && Date.now() - startedAt <= HOOK_CATCH_UP_DEADLINE_MS - HOOK_CATCH_UP_MIN_MS) {
-    const catchUpController = new AbortController();
-    let stopCatchUp;
-    const softStop = new Promise((resolve) => {
-      stopCatchUp = () => {
-        catchUpController.abort();
-        resolve({ chunksRecorded: 0, stoppedBecause: "aborted" });
-      };
-    });
-    event.signal?.addEventListener("abort", stopCatchUp, { once: true });
-    const softTimer = setTimeout(stopCatchUp, startedAt + HOOK_CATCH_UP_DEADLINE_MS - HOOK_RENDER_MARGIN_MS - Date.now());
-    let catchUp;
-    try {
-      catchUp = await Promise.race([
-        catchUpObserver({ pi, runtime, ctx, entries, gap: resolution.gap, resolved, maxChunks: runtime.config.compactionCatchUpMaxChunks, signal: catchUpController.signal }),
-        softStop
-      ]);
-    } finally {
-      clearTimeout(softTimer);
-      event.signal?.removeEventListener("abort", stopCatchUp);
-    }
-    if (event.signal?.aborted) return { cancel: true };
-    debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
-    if (catchUp.stoppedBecause === "error") {
-      return delegateCompaction(ctx, runtime, `observer catch-up failed: ${catchUp.reason ?? "unknown error"}`);
-    }
-    entries = ctx.sessionManager.getBranch();
-    resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
-  }
-  const summaryOptions = { maxTokens: summaryMaxTokens, observationsPoolMaxTokens: poolMaxTokens };
-  let fallback = resolution.kind === "fallback" ? resolution : void 0;
-  let cut = resolution.cut;
-  let projection = buildCompactionProjection(entries, cut.foldThroughEntryId, { observationsPoolMaxTokens: poolMaxTokens });
-  let summary = "";
-  if (resolution.kind === "cut") {
-    const rendered = renderSummaryWithBudget(projection.reflections, projection.observations, { maxTokens: summaryMaxTokens });
-    summary = rendered.text;
-    if (rendered.reflections.length + rendered.observations.length === 0) {
-      if (projection.reflections.length + projection.observations.length > 0) {
-        debugLog("compaction.summary_budget_empty", {
-          summaryMaxTokens,
-          reflections: projection.reflections.length,
-          observations: projection.observations.length
-        });
-        warn(ctx, `Observational memory: no memory record fits the ~${summaryMaxTokens.toLocaleString()}-token summary budget; using a truncated model-free summary`);
-      }
-      summary = renderFallbackSummary(entries, cut.foldThroughEntryId, summaryOptions);
-    }
-    if (resolution.gap && resolution.retainedTokens !== void 0) {
-      const summaryTokens = estimateStringTokens(summary);
-      if (resolution.retainedTokens + summaryTokens > maxRetainedTokens) {
-        fallback = {
-          kind: "fallback",
-          cut: { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId },
-          gap: resolution.gap,
-          reason: `retaining ~${resolution.retainedTokens.toLocaleString()} tokens plus a ~${summaryTokens.toLocaleString()}-token memory summary exceeds the ~${maxRetainedTokens.toLocaleString()}-token budget`
-        };
-        cut = fallback.cut;
-        projection = buildCompactionProjection(entries, cut.foldThroughEntryId, { observationsPoolMaxTokens: poolMaxTokens });
-      }
-    }
-  }
-  if (fallback) {
-    summary = renderFallbackSummary(entries, cut.foldThroughEntryId, summaryOptions);
-    warn(
-      ctx,
-      `Observational memory: observer has not reached ${describeUnobservedSpan(fallback.gap)} before the compaction cut and they cannot be retained (${fallback.reason}); compacting with a model-free summary of the memory so far`
-    );
-  }
-  const gap = resolution.gap;
-  if (gap) {
-    debugLog("compaction.observer_behind", {
-      proposedFirstKeptEntryId: firstKeptEntryId,
-      unobservedEntries: gap.entryCount,
-      unobservedTokens: gap.tokens,
-      outcome: fallback ? "fallback" : "cut",
-      firstKeptEntryId: cut.firstKeptEntryId,
-      foldThroughEntryId: cut.foldThroughEntryId,
-      summaryTokens: estimateStringTokens(summary),
-      maxRetainedTokens,
-      ...fallback ? { reason: fallback.reason } : { retainedTokens: resolution.kind === "cut" ? resolution.retainedTokens : void 0 }
-    });
-    if (!fallback) {
-      notify(
-        ctx,
-        `Observational memory: observer has not reached ${describeUnobservedSpan(gap)} before the compaction cut; keeping them in context until they are observed`,
-        "info"
-      );
-    }
-  }
-  return {
-    compaction: {
-      summary,
-      firstKeptEntryId: cut.firstKeptEntryId,
-      tokensBefore,
-      details: projection.details
-    }
-  };
-}
-function compactAfterFailure(event, ctx, runtime, error) {
-  if (event.signal?.aborted) return { cancel: true };
-  return delegateCompaction(ctx, runtime, `compaction hook failed: ${errorMessage(error)}`);
-}
-function registerCompactionHook(pi, runtime) {
-  pi.on("session_before_compact", async (event, ctx) => {
-    if (runtime.compactHookInFlight) {
-      warn(ctx, "Observational memory: another compaction is already in progress; cancelling duplicate");
-      return { cancel: true };
-    }
-    if (event.signal?.aborted) return { cancel: true };
-    runtime.compactHookInFlight = true;
-    try {
-      runtime.ensureConfig(ctx.cwd);
-      return await withCompactionDeadline(
-        event.signal,
-        ctx,
-        runtime,
-        (signal) => withDebugLogContext(debugContext(runtime, ctx), () => handleCompaction(pi, { ...event, signal }, ctx, runtime))
-      );
-    } catch (error) {
-      return compactAfterFailure(event, ctx, runtime, error);
-    } finally {
-      runtime.compactHookInFlight = false;
-    }
-  });
-}
-
-// src/agents/dropper/agent.ts
-import { Type as Type2 } from "@earendil-works/pi-ai";
-
-// src/agents/dropper/prompts.ts
-var DROPPER_SYSTEM = `You are the dropper agent for a coding assistant.
-
-These records are the ONLY information the assistant will have about past interactions once the raw conversation is compacted out of context. Dropping the wrong observation can make future work repeat, contradict, or misremember the user. Take this seriously.
-
-Your job is to identify only the safest active observations to remove from compacted memory by calling drop_observations with their ids. Default action is KEEP. When uncertain, keep the observation.
-
-Active-memory framing. Dropping an observation removes it from active compacted memory; it does not erase the ledger history or source evidence. Still, future compressed context will no longer show the observation, so only drop it when its durable meaning is safely captured elsewhere or it is genuinely low-signal and carries no unique future value.
-
-The user message includes the active observation pool target and "Maximum drops allowed this run". The maximum is a hard upper bound sized to move the pool toward the target if every proposed drop is clearly safe. It is not a target. Do not try to fill it. Drop fewer or none when fewer observations are safely removable. When the active pool is far over target, make a thorough pass over safe candidates rather than stopping after a few obvious examples.
-
-What to drop, in priority order:
-- Redundant observations whose durable meaning is already captured by current reflections with equivalent fidelity.
-- Superseded observations where a later observation clearly replaces the older state.
-- Repeated routine tool acknowledgements or low-signal progress updates that do not carry decisions, constraints, exact errors, or user-specific facts.
-- Older observations that no longer carry working context and are covered by a reflection or a newer observation.
-
-Age-gradient rule. Recent observations carry working context the assistant may still need; older observations have usually been summarized elsewhere or are no longer load-bearing. Prefer older safe drops before newer working context, but age alone is not enough to drop important or uniquely load-bearing observations.
-
-Reflection coverage guidance. Each observation line includes [coverage: none|partial|strong]. Coverage is evidence, not an automatic decision:
-- none: no current reflection cites this observation id. Be cautious, especially for high or critical observations.
-- partial: one current reflection cites this observation id. Compare the observation to the reflection before dropping.
-- strong: two or more current reflections cite this observation id. This is stronger evidence that the durable meaning is preserved, but you must still keep uniquely load-bearing or uncertain observations.
-
-Relevance guidance. Relevance is importance/resistance, not an absolute keep/drop lock:
-- low: consider first, but drop only when it carries no unique detail, decision, state, error, identifier, or user-specific fact.
-- medium: drop when redundant with reflections or other observations, or when the work state is clearly obsolete.
-- high: drop only when clearly superseded or already captured by a reflection with equivalent fidelity.
-- critical: highest importance and strongest resistance. Do not drop fresh or uniquely load-bearing critical observations. Critical observations may be dropped only with strong semantic evidence such as age plus partial/strong reflection coverage, supersession by newer memory, redundancy, or clear obsolescence.
-
-User assertions and concrete completions must be preserved unless a current reflection or newer observation preserves the exact assertion/completion and its important details with equivalent fidelity.
-
-Preservation floor. Regardless of relevance label, budget pressure, coverage, or age, do not drop observations that uniquely carry any of the following:
-- User preferences, constraints, corrections, or identity/role facts.
-- Concrete completions that future runs must not redo.
-- Named identifiers, file paths, function names, package names, tickets, commit SHAs, handles, or exact commands.
-- Exact error messages, diagnostic output, or test failure names.
-- Architectural or technical decisions and their rationale.
-- Dates of specific events, deadlines, meetings, migrations, or incidents.
-- Current unresolved blockers, TODOs, partial work, or decisions waiting on the user.
-- Non-standard user terminology or unusual phrasing needed for future recognition.
-
-What you cannot do:
-- You cannot merge observations.
-- You cannot rewrite or edit observations.
-- You cannot add new observations or reflections.
-- You can only call drop_observations with ids from the current observations list.
-
-Do not force drops you do not believe in. If no observations are safe to drop, do not call the tool and reply briefly. Hitting the budget or maximum count is less important than preserving load-bearing memory.`;
-
-// src/agents/dropper/coverage.ts
-var REFLECTION_COVERAGE_DROP_RANK = {
-  strong: 0,
-  partial: 1,
-  none: 2
-};
-function reflectionSupportCounts(reflections) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const reflection of reflections) {
-    const uniqueIds = new Set(reflection.supportingObservationIds);
-    for (const id of uniqueIds) counts.set(id, (counts.get(id) ?? 0) + 1);
-  }
-  return counts;
-}
-function reflectionCoverageTierForCount(count) {
-  if (count <= 0) return "none";
-  if (count === 1) return "partial";
-  return "strong";
-}
-function reflectionCoverageMap(observations, reflections) {
-  const counts = reflectionSupportCounts(reflections);
-  return new Map(observations.map((observation) => [
-    observation.id,
-    reflectionCoverageTierForCount(counts.get(observation.id) ?? 0)
-  ]));
-}
-function emptyCoverageBucket() {
-  return {
-    none: { count: 0, tokens: 0 },
-    partial: { count: 0, tokens: 0 },
-    strong: { count: 0, tokens: 0 }
-  };
-}
-function emptyCoverageSummaryByRelevance() {
-  return {
-    low: emptyCoverageBucket(),
-    medium: emptyCoverageBucket(),
-    high: emptyCoverageBucket(),
-    critical: emptyCoverageBucket()
-  };
-}
-function summarizeCoverageByRelevance(observations, coverageById) {
-  const summary = emptyCoverageSummaryByRelevance();
-  for (const observation of observations) {
-    const tier = coverageById.get(observation.id) ?? "none";
-    const bucket = summary[observation.relevance][tier];
-    bucket.count++;
-    bucket.tokens += observation.tokenCount;
-  }
-  return summary;
-}
-function summarizeCoverageByRelevanceForIds(ids, observations, coverageById) {
-  const byId = new Map(observations.map((observation) => [observation.id, observation]));
-  const selected = ids.flatMap((id) => {
-    const observation = byId.get(id);
-    return observation ? [observation] : [];
-  });
-  return summarizeCoverageByRelevance(selected, coverageById);
-}
-function emptyCoverageTransitionSummaryByRelevance() {
-  return {
-    low: {},
-    medium: {},
-    high: {},
-    critical: {}
-  };
-}
-function summarizeCoverageTransitionsByRelevance(observations, beforeCoverageById, afterCoverageById) {
-  const summary = emptyCoverageTransitionSummaryByRelevance();
-  for (const observation of observations) {
-    const before = beforeCoverageById.get(observation.id) ?? "none";
-    const after = afterCoverageById.get(observation.id) ?? "none";
-    if (before === after) continue;
-    const key = `${before}->${after}`;
-    const bucket = summary[observation.relevance][key] ?? { count: 0, tokens: 0 };
-    bucket.count++;
-    bucket.tokens += observation.tokenCount;
-    summary[observation.relevance][key] = bucket;
-  }
-  return summary;
-}
-function observationToDropperLine(observation, coverage) {
-  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] [coverage: ${coverage}] ${observation.content}`;
-}
-function coverageTierForObservation(observation, coverageById) {
-  return coverageById.get(observation.id) ?? "none";
-}
-
-// src/agents/dropper/agent.ts
-var DropperStreamError = class extends Error {
-  stopReason;
-  constructor(stopReason, errorMessage3) {
-    super(`dropper stream ended with stopReason "${stopReason}"${errorMessage3 ? `: ${errorMessage3}` : ""}`);
-    this.name = "DropperStreamError";
-    this.stopReason = stopReason;
-  }
-};
-var RELEVANCE_DROP_RANK = {
-  low: 0,
-  medium: 1,
-  high: 2,
-  critical: 3
-};
-var DropObservationsSchema = Type2.Object({
-  ids: Type2.Array(Type2.String({ minLength: 1 }), { minItems: 1 }),
-  reason: Type2.Optional(Type2.String())
-});
-function joinOrEmpty2(items) {
-  return items.length ? items.join("\n") : "(none yet)";
-}
-function relevanceCounts(observations) {
-  return observations.reduce((counts, observation) => {
-    counts[observation.relevance]++;
-    return counts;
-  }, { low: 0, medium: 0, high: 0, critical: 0 });
-}
-function timestampRank(timestamp) {
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
-}
-function selectDropCandidates(ids, observations, maxDrops, reflections = []) {
-  if (maxDrops <= 0 || ids.length === 0) return [];
-  const byId = new Map(observations.map((observation) => [observation.id, observation]));
-  const coverageById = reflectionCoverageMap(observations, reflections);
-  const firstProposalIndex = /* @__PURE__ */ new Map();
-  for (let i = 0; i < ids.length; i++) {
-    const id = ids[i];
-    if (!firstProposalIndex.has(id)) firstProposalIndex.set(id, i);
-  }
-  return Array.from(firstProposalIndex.entries()).map(([id, index]) => ({ id, index, observation: byId.get(id) })).filter(
-    (candidate) => candidate.observation !== void 0
-  ).sort((a, b) => {
-    const coverageDelta = REFLECTION_COVERAGE_DROP_RANK[coverageTierForObservation(a.observation, coverageById)] - REFLECTION_COVERAGE_DROP_RANK[coverageTierForObservation(b.observation, coverageById)];
-    const relevanceDelta = RELEVANCE_DROP_RANK[a.observation.relevance] - RELEVANCE_DROP_RANK[b.observation.relevance];
-    const ageDelta = timestampRank(a.observation.timestamp) - timestampRank(b.observation.timestamp);
-    return coverageDelta || relevanceDelta || ageDelta || a.index - b.index;
-  }).slice(0, maxDrops).map((candidate) => candidate.id);
-}
-async function runDropper(args) {
-  const { model, apiKey, headers, env, reflections, observations, targetTokens, signal } = args;
-  if (observations.length === 0) return void 0;
-  const metrics = observationPoolMetrics(observations, targetTokens);
-  const { observationTokens, fullness, tokensOverTarget, maxDropsAllowed } = metrics;
-  const coverageById = reflectionCoverageMap(observations, reflections);
-  const coverageSummaryByRelevance = summarizeCoverageByRelevance(observations, coverageById);
-  debugLog("dropper.agent_start", {
-    activeObservationCount: observations.length,
-    reflectionCount: reflections.length,
-    observationTokens,
-    targetTokens,
-    tokensOverTarget,
-    fullness,
-    maxDropsAllowed,
-    relevanceCounts: relevanceCounts(observations),
-    coverageSummaryByRelevance
-  });
-  if (maxDropsAllowed <= 0) {
-    debugLog("dropper.result", {
-      reason: "not_over_target",
-      toolCallCount: 0,
-      rawRequestedIdsCount: 0,
-      acceptedCandidateCount: 0,
-      selectedDropsCount: 0,
-      selectedDropTokens: 0,
-      selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds([], observations, coverageById),
-      maxDropsAllowed
-    });
-    return void 0;
-  }
-  const proposedDropIds = [];
-  const proposed = /* @__PURE__ */ new Set();
-  const allowed = new Map(observations.map((observation) => [observation.id, observation]));
-  let toolCallCount = 0;
-  let rawRequestedIdsCount = 0;
-  let missingIdsCount = 0;
-  let criticalCandidateIdsCount = 0;
-  let duplicateInRequestCount = 0;
-  let duplicateInRunCount = 0;
-  const dropObservations = {
-    name: "drop_observations",
-    label: "Drop observations",
-    description: "Propose active observation ids that are safe to remove from compacted memory.",
-    parameters: DropObservationsSchema,
-    execute: async (_id, params) => {
-      toolCallCount++;
-      rawRequestedIdsCount += params.ids.length;
-      const seenInRequest = /* @__PURE__ */ new Set();
-      let added = 0;
-      let requestMissingIds = 0;
-      let requestCriticalCandidateIds = 0;
-      let requestDuplicateIds = 0;
-      let requestDuplicateInRunIds = 0;
-      for (const id of params.ids) {
-        const observation = allowed.get(id);
-        if (!observation) {
-          missingIdsCount++;
-          requestMissingIds++;
-          continue;
-        }
-        if (seenInRequest.has(id)) {
-          duplicateInRequestCount++;
-          requestDuplicateIds++;
-          continue;
-        }
-        seenInRequest.add(id);
-        if (proposed.has(id)) {
-          duplicateInRunCount++;
-          requestDuplicateInRunIds++;
-          continue;
-        }
-        proposed.add(id);
-        proposedDropIds.push(id);
-        if (observation.relevance === "critical") {
-          criticalCandidateIdsCount++;
-          requestCriticalCandidateIds++;
-        }
-        added++;
-      }
-      debugLog("dropper.tool_call", {
-        toolCallCount,
-        rawRequestedIdsCount: params.ids.length,
-        acceptedIdsCount: added,
-        missingIdsCount: requestMissingIds,
-        criticalCandidateIdsCount: requestCriticalCandidateIds,
-        duplicateInRequestCount: requestDuplicateIds,
-        duplicateInRunCount: requestDuplicateInRunIds,
-        totalCandidates: proposedDropIds.length,
-        maxDropsAllowed
-      });
-      return {
-        content: [{ type: "text", text: `Queued ${added} drop candidate${added === 1 ? "" : "s"}. Candidates this run: ${proposedDropIds.length}. Maximum drops allowed: ${maxDropsAllowed}.` }],
-        details: { added, totalCandidates: proposedDropIds.length, maxDropsAllowed }
-      };
-    }
-  };
-  const fullnessPercent = Math.round(fullness * 100);
-  const userText = `CURRENT REFLECTIONS:
-${joinOrEmpty2(reflections.map(reflectionToSummaryLine))}
-
-CURRENT OBSERVATIONS:
-${joinOrEmpty2(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}
-
-Active observation pool: ~${observationTokens.toLocaleString()} tokens; target: ~${targetTokens.toLocaleString()} tokens; fullness against target: ~${fullnessPercent.toLocaleString()}%; over target by ~${tokensOverTarget.toLocaleString()} tokens.
-Maximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"}. This maximum is sized to move the active pool toward the target if every proposed drop is clearly safe.
-This maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
-  const prompts = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
-  const context = {
-    systemPrompt: [DROPPER_SYSTEM],
-    messages: [],
-    tools: [dropObservations]
-  };
-  const reasoning = model.reasoning;
-  const thinkingLevel = args.thinkingLevel ?? "low";
-  const cap = createTurnCap(args.maxTurns, signal);
-  const config = {
-    model,
-    apiKey,
-    headers,
-    env,
-    maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
-    convertToLlm: (msgs) => msgs,
-    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}
-  };
-  const loop = args.agentLoop ?? agentLoop;
-  const stream = loop(prompts, context, config, cap.signal);
-  let streamError;
-  try {
-    for await (const event of stream) {
-      cap.observe(event);
-      logAgentStreamError("dropper", event);
-      const message = event.message;
-      if (!cap.capped && message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-        streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
-      }
-    }
-    await stream.result();
-  } finally {
-    cap.dispose();
-  }
-  if (streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
-  const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
-  const reason = droppedIds.length > 0 ? "selected_nonempty" : toolCallCount === 0 ? "no_tool_call" : proposedDropIds.length === 0 ? "all_filtered" : "selected_empty";
-  const selectedDropTokens = droppedIds.reduce((sum, id) => sum + (allowed.get(id)?.tokenCount ?? 0), 0);
-  debugLog("dropper.result", {
-    reason,
-    toolCallCount,
-    rawRequestedIdsCount,
-    missingIdsCount,
-    criticalCandidateIdsCount,
-    duplicateInRequestCount,
-    duplicateInRunCount,
-    acceptedCandidateCount: proposedDropIds.length,
-    selectedDropsCount: droppedIds.length,
-    selectedDropTokens,
-    selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds(droppedIds, observations, coverageById),
-    maxDropsAllowed
-  });
-  return droppedIds.length > 0 ? droppedIds : void 0;
 }
 
 // src/agents/reflector/agent.ts
@@ -10088,8 +9355,8 @@ Examples:
 // src/agents/reflector/agent.ts
 var ReflectorStreamError = class extends Error {
   stopReason;
-  constructor(stopReason, errorMessage3) {
-    super(`reflector stream ended with stopReason "${stopReason}"${errorMessage3 ? `: ${errorMessage3}` : ""}`);
+  constructor(stopReason, errorMessage2) {
+    super(`reflector stream ended with stopReason "${stopReason}"${errorMessage2 ? `: ${errorMessage2}` : ""}`);
     this.name = "ReflectorStreamError";
     this.stopReason = stopReason;
   }
@@ -10257,6 +9524,200 @@ Crystallize any missing durable facts or patterns into new reflections. If nothi
     coverageTransitionsByRelevance: summarizeCoverageTransitionsByRelevance(observations, coverageById, afterCoverageById)
   });
   return acceptedReflections.length > 0 ? acceptedReflections : void 0;
+}
+
+// src/config.ts
+var import_yaml = __toESM(require_dist(), 1);
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync, writeFileSync } from "node:fs";
+import { join as join2 } from "node:path";
+var DEFAULTS = {
+  observeAfterTokens: 1e4,
+  reflectAfterTokens: 2e4,
+  observationsPoolMaxTokens: 2e4,
+  observationsPoolTargetTokens: 1e4,
+  agentMaxTurns: 16,
+  agentMaxTokens: 32e3,
+  model: "@smol",
+  showWorkerNotifications: true,
+  passive: false,
+  debugLog: false
+};
+var WORKER_THINKING_LEVEL = "low";
+var WORKER_MEMORY_FALLBACK_MAX_TOKENS = 16e3;
+var WORKER_MEMORY_CONTEXT_RATIO = 0.25;
+function resolveWorkerMemoryMaxTokens(config, contextWindow) {
+  if (config.workerMemoryMaxTokens !== void 0 && config.workerMemoryMaxTokens > 0) return config.workerMemoryMaxTokens;
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(1, Math.floor(contextWindow * WORKER_MEMORY_CONTEXT_RATIO));
+  }
+  return WORKER_MEMORY_FALLBACK_MAX_TOKENS;
+}
+var OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 6e4;
+var OBSERVER_CHUNK_MIN_TOKENS = 256;
+var OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
+function resolveObserverChunkMaxTokens(config, contextWindow) {
+  if (config.observerChunkMaxTokens !== void 0 && config.observerChunkMaxTokens > 0) {
+    return Math.max(OBSERVER_CHUNK_MIN_TOKENS, config.observerChunkMaxTokens);
+  }
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(
+      OBSERVER_CHUNK_MIN_TOKENS,
+      Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO)
+    );
+  }
+  return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
+}
+var CONFIG_FILE = "omp-om.yml";
+var LEGACY_CONFIG_FILE = "omp-om.json";
+var DEFAULT_CONFIG_YAML = `# omp-om settings. Every key is optional; delete a line to get its default.
+# A project file at <project>/.omp/omp-om.yml is merged over this one.
+
+# Memory model for observer, reflector and dropper: provider/id, a bare id,
+# or a role alias such as @smol.
+model: "@smol"
+
+# Run the observer when this many tokens of conversation are unobserved.
+observeAfterTokens: 10000
+# Run the reflector when this many tokens of observations are unreflected.
+reflectAfterTokens: 20000
+# Keep observeAfterTokens < reflectAfterTokens < omp's compaction threshold.
+
+# Active observation budget; reaching it makes compaction a full fold.
+observationsPoolMaxTokens: 20000
+# Size the dropper trims toward (default: half of observationsPoolMaxTokens).
+# observationsPoolTargetTokens: 10000
+
+# Turn cap and output token request for each worker loop.
+agentMaxTurns: 16
+agentMaxTokens: 32000
+
+# Unset: derived from the memory model's context window (a fifth of it; 60000 if unknown).
+# observerChunkMaxTokens: 60000
+# Unset: derived from the memory model's context window (a quarter of it; 16000 if unknown).
+# workerMemoryMaxTokens: 16000
+
+showWorkerNotifications: true
+# Turn off the automatic workers; commands and the compaction hook stay active.
+passive: false
+debugLog: false
+`;
+var PASSIVE_ENV = "OMP_OM_PASSIVE";
+var REMOVED_KEYS = [
+  "compactAfterTokens",
+  "compactAfterTokensMode",
+  "compactAfterTokensRatio",
+  "consolidateWhenIdle",
+  "fallbackModel",
+  "compactionCatchUpMaxChunks",
+  "compactionMaxRetainedTokens",
+  "compactionSummaryMaxTokens"
+];
+function positiveIntegerOrUndefined(value) {
+  return Number.isInteger(value) && typeof value === "number" && value > 0 ? value : void 0;
+}
+function validTargetOrUndefined(value, maxTokens) {
+  const target = positiveIntegerOrUndefined(value);
+  return target !== void 0 && target < maxTokens ? target : void 0;
+}
+function derivedObservationPoolTarget(maxTokens) {
+  return Math.floor(maxTokens / 2);
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null;
+}
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+function normalizeSettingsConfig(path, value, warnings) {
+  const normalized = {};
+  const numberKeys = [
+    "observeAfterTokens",
+    "reflectAfterTokens",
+    "observerChunkMaxTokens",
+    "workerMemoryMaxTokens",
+    "observationsPoolMaxTokens",
+    "observationsPoolTargetTokens",
+    "agentMaxTurns",
+    "agentMaxTokens"
+  ];
+  for (const key of numberKeys) {
+    const normalizedValue = positiveIntegerOrUndefined(value[key]);
+    if (normalizedValue !== void 0) normalized[key] = normalizedValue;
+  }
+  if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
+  if (typeof value.passive === "boolean") normalized.passive = value.passive;
+  if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
+  if (value.model !== void 0) {
+    const model = nonEmptyString(value.model);
+    if (model) normalized.model = model;
+    else warnings.push(`${path}: "model" must be a non-empty string such as "@smol" or "provider/id"; ignored`);
+  }
+  for (const key of REMOVED_KEYS) {
+    if (key in value) warnings.push(`${path}: "${key}" is no longer supported; ignored`);
+  }
+  return normalized;
+}
+function readEnvConfig(env = process.env) {
+  const rawPassive = env[PASSIVE_ENV];
+  if (rawPassive === void 0) return {};
+  const passive = rawPassive.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(passive)) return { passive: true };
+  if (["0", "false", "no", "off"].includes(passive)) return { passive: false };
+  return {};
+}
+function readConfigFile(path, warnings) {
+  if (!existsSync2(path)) return {};
+  let raw;
+  try {
+    raw = (0, import_yaml.parse)(readFileSync(path, "utf-8"));
+  } catch (error) {
+    warnings.push(`${path}: ${error instanceof Error ? error.message : String(error)}; using defaults for this file`);
+    return {};
+  }
+  if (raw === null || raw === void 0) return {};
+  if (!isRecord(raw) || Array.isArray(raw)) {
+    warnings.push(`${path}: expected a YAML mapping of keys to values; using defaults for this file`);
+    return {};
+  }
+  return normalizeSettingsConfig(path, raw, warnings);
+}
+function warnLegacyConfig(dir, warnings) {
+  const legacy = join2(dir, LEGACY_CONFIG_FILE);
+  if (existsSync2(legacy)) {
+    warnings.push(`${legacy}: omp-om now reads ${CONFIG_FILE}; move these settings there and delete this file`);
+  }
+}
+function ensureGlobalConfig(agentDir) {
+  const path = join2(agentDir, CONFIG_FILE);
+  if (existsSync2(path) || existsSync2(join2(agentDir, LEGACY_CONFIG_FILE))) return [];
+  try {
+    mkdirSync2(agentDir, { recursive: true });
+    writeFileSync(path, DEFAULT_CONFIG_YAML, { encoding: "utf-8", flag: "wx" });
+    return [];
+  } catch (error) {
+    if (error.code === "EEXIST") return [];
+    return [`${path}: could not create default settings file: ${error instanceof Error ? error.message : String(error)}`];
+  }
+}
+function loadConfig(cwd, agentDir, env = process.env) {
+  const warnings = [];
+  warnLegacyConfig(agentDir, warnings);
+  warnLegacyConfig(join2(cwd, ".omp"), warnings);
+  const globalConfig = readConfigFile(join2(agentDir, CONFIG_FILE), warnings);
+  const projectConfig = readConfigFile(join2(cwd, ".omp", CONFIG_FILE), warnings);
+  const envConfig = readEnvConfig(env);
+  const merged = {
+    ...DEFAULTS,
+    observationsPoolTargetTokens: void 0,
+    ...globalConfig,
+    ...projectConfig,
+    ...envConfig
+  };
+  const target = validTargetOrUndefined(
+    merged.observationsPoolTargetTokens,
+    merged.observationsPoolMaxTokens
+  ) ?? derivedObservationPoolTarget(merged.observationsPoolMaxTokens);
+  return { config: { ...merged, observationsPoolTargetTokens: target }, warnings };
 }
 
 // src/hooks/consolidation-trigger.ts
@@ -10657,7 +10118,7 @@ function hasConfiguredProviderCredential(registry, model) {
     return false;
   }
 }
-function errorMessage2(error) {
+function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 var Runtime = class {
@@ -10700,7 +10161,7 @@ var Runtime = class {
       if (!ctx.models) return { ok: false, reason: "ctx.models is unavailable; omp-om requires omp's extension context" };
       model = ctx.models.resolve(spec);
     } catch (error) {
-      return { ok: false, reason: `memory model "${spec}" failed to resolve: ${errorMessage2(error)}` };
+      return { ok: false, reason: `memory model "${spec}" failed to resolve: ${errorMessage(error)}` };
     }
     if (!model) {
       return { ok: false, reason: `memory model "${spec}" did not resolve to an available model; set "model" in omp-om.yml` };
@@ -10708,7 +10169,7 @@ var Runtime = class {
     try {
       return await this.resolveCandidate(ctx, model);
     } catch (error) {
-      return { ok: false, reason: `auth lookup failed for memory model "${spec}": ${errorMessage2(error)}` };
+      return { ok: false, reason: `auth lookup failed for memory model "${spec}": ${errorMessage(error)}` };
     }
   }
   /** Apply Pi's request-auth acceptance rule to one already-selected model. */
@@ -10823,7 +10284,7 @@ var Runtime = class {
     this.memoryFailureReason = reason;
     if (!alreadyNotified && ctx.hasUI && ctx.ui) {
       try {
-        ctx.ui.notify(`Observational memory: ${reason} (model "${this.config.model}"). Memory updates stopped for this pass; you can continue working. omp will use normal compaction until a worker request succeeds.`, "warning");
+        ctx.ui.notify(`Observational memory: ${reason} (model "${this.config.model}"). Memory updates stopped for this pass; you can continue working. Existing memory remains available for compaction.`, "warning");
       } catch {
       }
     }
@@ -10831,14 +10292,14 @@ var Runtime = class {
   }
   launchTrackedTask(ctx, work, onFinally) {
     return (async () => {
-      let errorMessage3;
+      let errorMessage2;
       try {
         await work();
       } catch (error) {
-        errorMessage3 = error instanceof Error ? error.message : String(error);
-        this.recordConsolidationStageError(ctx, this.consolidationPhase ?? "observer", errorMessage3);
+        errorMessage2 = error instanceof Error ? error.message : String(error);
+        this.recordConsolidationStageError(ctx, this.consolidationPhase ?? "observer", errorMessage2);
       } finally {
-        onFinally(errorMessage3);
+        onFinally(errorMessage2);
       }
     })();
   }
