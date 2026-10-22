@@ -1,5 +1,5 @@
 import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { type Config, DEFAULTS, loadConfig } from "./config.js";
+import { type Config, DEFAULTS, ensureGlobalConfig, loadConfig } from "./config.js";
 import { debugLog } from "./debug-log.js";
 
 export type ResolveResult =
@@ -118,7 +118,7 @@ function errorMessage(error: unknown): string {
 
 export class Runtime {
 	config: Config = { ...DEFAULTS };
-	/** Problems found while loading `omp-om.json` (malformed files, removed or invalid keys); shown by `/om:status`. */
+	/** Problems found while loading `omp-om.yml` (malformed files, removed or invalid keys); shown by `/om:status`. */
 	configWarnings: string[] = [];
 	configLoaded = false;
 	consolidationInFlight = false;
@@ -141,9 +141,11 @@ export class Runtime {
 
 	ensureConfig(cwd: string): void {
 		if (this.configLoaded) return;
-		const { config, warnings } = loadConfig(cwd, getAgentDir());
+		const agentDir = getAgentDir();
+		const seedWarnings = ensureGlobalConfig(agentDir);
+		const { config, warnings } = loadConfig(cwd, agentDir);
 		this.config = config;
-		this.configWarnings = warnings;
+		this.configWarnings = [...seedWarnings, ...warnings];
 		this.configLoaded = true;
 	}
 
@@ -163,7 +165,7 @@ export class Runtime {
 			return { ok: false, reason: `memory model "${spec}" failed to resolve: ${errorMessage(error)}` };
 		}
 		if (!model) {
-			return { ok: false, reason: `memory model "${spec}" did not resolve to an available model; set "model" in omp-om.json` };
+			return { ok: false, reason: `memory model "${spec}" did not resolve to an available model; set "model" in omp-om.yml` };
 		}
 		try {
 			return await this.resolveCandidate(ctx, model);

@@ -50,7 +50,7 @@ To remove it: `omp plugin uninstall omp-om`.
 - Installed from GitHub: `omp plugin upgrade omp-om`, then restart omp.
 - Linked from a clone: `git pull` in the clone, then restart omp. `dist/` is committed, so no rebuild is needed.
 
-Your `omp-om.json` and existing session memory are untouched by updates.
+Your `omp-om.yml` and existing session memory are untouched by updates.
 
 ## Quick start
 
@@ -58,42 +58,43 @@ Your `omp-om.json` and existing session memory are untouched by updates.
 2. Work normally. omp-om observes the session in the background once enough conversation has built up (about 10,000 tokens by default).
 3. Run `/om:status` to see memory counts and progress toward the next observation.
 4. Run `/om:view` to see what has been remembered. When omp compacts, this ledger becomes the summary.
-5. To use a different or cheaper memory model, or tune thresholds, create `~/.omp/agent/omp-om.json` (see [Configuration](#configuration)).
+5. To use a different or cheaper memory model, or tune thresholds, edit `~/.omp/agent/omp-om.yml`. omp-om creates it with every default on first start (see [Configuration](#configuration)).
 
 omp-om never edits omp's settings. omp's compaction stays on and omp's own threshold decides when it fires. Keep `observeAfterTokens` < `reflectAfterTokens` < omp's compaction threshold so the ledger is ahead of the cut.
 
 ## Configuration
 
-omp-om reads one file, `omp-om.json`:
+omp-om reads one YAML file, `omp-om.yml`:
 
-- **Global:** `~/.omp/agent/omp-om.json` (`<agent dir>/omp-om.json`).
-- **Project override:** `<project>/.omp/omp-om.json`, merged over the global file.
+- **Global:** `~/.omp/agent/omp-om.yml` (`<agent dir>/omp-om.yml`). Created with all defaults and comments the first time omp-om starts, if it does not exist. Never overwritten.
+- **Project override:** `<project>/.omp/omp-om.yml`, merged over the global file. Not created automatically.
 - **Environment:** `PI_OBSERVATIONAL_MEMORY_PASSIVE` (`1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`) overrides only `passive`.
 
-Every key is optional. This is the complete default configuration; copy it into `~/.omp/agent/omp-om.json` and edit what you need:
+Every key is optional; delete a line to get its default. The generated file looks like this (keys with derived defaults are commented out):
 
-```json
-{
-  "model": "@smol",
-  "observeAfterTokens": 10000,
-  "reflectAfterTokens": 20000,
-  "observationsPoolMaxTokens": 20000,
-  "agentMaxTurns": 16,
-  "agentMaxTokens": 32000,
-  "compactionCatchUpMaxChunks": 2,
-  "showWorkerNotifications": true,
-  "passive": false,
-  "debugLog": false
-}
+```yaml
+model: "@smol"
+observeAfterTokens: 10000
+reflectAfterTokens: 20000
+observationsPoolMaxTokens: 20000
+# observationsPoolTargetTokens: 10000
+agentMaxTurns: 16
+agentMaxTokens: 32000
+compactionCatchUpMaxChunks: 2
+showWorkerNotifications: true
+passive: false
+debugLog: false
 ```
 
 The smallest useful file just picks a model:
 
-```json
-{ "model": "@smol" }
+```yaml
+model: "@smol"
 ```
 
-A bad file never breaks omp. A file that isn't a valid JSON object is skipped with a warning, and a single bad value is ignored so the default stays. Numeric values must be positive integers (`compactionCatchUpMaxChunks` may be `0`). `/om:status` lists config warnings.
+A bad file never breaks omp. A file that is not valid YAML or not a mapping is skipped with a warning, and a single bad value is ignored so the default stays. Numeric values must be positive integers (`compactionCatchUpMaxChunks` may be `0`). `/om:status` lists config warnings.
+
+Earlier builds read `omp-om.json`. That file is no longer read: if one exists, omp-om does not create `omp-om.yml` and `/om:status` warns until you move the settings over and delete it.
 
 ### Options
 
