@@ -118,7 +118,7 @@ Earlier builds read `omp-om.json`. That file is no longer read: if one exists, o
 | `compactionCatchUpMaxChunks` | `2` | Observer chunks allowed synchronously before a compaction. `0` disables catch-up. |
 | `observerChunkMaxTokens` | derived | Cap on one observer chunk (minimum `256`). Unset: a fifth of the memory model's context window, or `60000` if unknown. |
 | `workerMemoryMaxTokens` | derived | Budget for prior memory carried by each worker request. Unset: a quarter of the memory model's window, or `16000`. |
-| `compactionSummaryMaxTokens` | derived | Budget for the rendered summary. Unset: an eighth of the session model's window, or `8000`. |
+| `compactionSummaryMaxTokens` | `25000` | Budget for the rendered summary. Fixed so it stays under omp's compaction threshold on large-window models. If unset, an eighth of the session model's window, or `8000`. |
 | `compactionMaxRetainedTokens` | derived | How much unobserved conversation may stay in context past omp's cut. Default `30000`; if unset, one eighth of the session model's window. |
 | `showWorkerNotifications` | `true` | Show routine worker progress notices when the session has a UI. Failure warnings are always shown. |
 | `passive` | `false` | Turn off the automatic workers. The commands, `om_recall` and the compaction hook stay active. |
