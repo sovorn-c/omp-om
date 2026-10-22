@@ -889,7 +889,7 @@ describe("observer chunk cap", () => {
 			textCustomMessage("raw-2", "b".repeat(800)),
 		];
 		const { fire, runLaunchedWork, runtime } = setup({ entries, observerChunkMaxTokens: 256, reflectAfterTokens: 999 });
-		(runtime as any).compactHookInFlight = true;
+		Object.assign(runtime, { compactHookInFlight: true });
 
 		fire();
 		await runLaunchedWork();
