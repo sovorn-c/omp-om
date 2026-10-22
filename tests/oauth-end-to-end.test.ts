@@ -163,7 +163,7 @@ describe("OAuth provider end-to-end consolidation", () => {
 			modelRegistry: await oauthModelRegistry(),
 			sessionManager: { getBranch: () => entries },
 		});
-		await Promise.all([runtime.observerPromise, runtime.maintenancePromise]);
+		await runtime.consolidationPromise;
 
 		// The observer really called the provider, authenticating with the OAuth header.
 		expect(requests).toHaveLength(1);
@@ -216,10 +216,10 @@ describe("OAuth provider end-to-end consolidation", () => {
 			modelRegistry: expiredOAuthModelRegistry(),
 			sessionManager: { getBranch: () => entries },
 		});
-		await Promise.all([runtime.observerPromise, runtime.maintenancePromise]);
+		await runtime.consolidationPromise;
 
 		const warning = notices.find((message) => message.includes("/login openai-codex"));
-		expect(warning).toContain("normal compaction");
+		expect(notices).toContainEqual(expect.stringContaining("/login openai-codex"));
 		expect(runtime.memoryFailureReason).toContain("authentication failed");
 		expect(appended).toEqual([]);
 

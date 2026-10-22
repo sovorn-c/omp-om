@@ -210,29 +210,17 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 	}
 }
 
-/** Launch the maintenance lane when the reflector is due and its lane is free. */
-function maybeLaunchMaintenance(
-	pi: ExtensionAPI,
-	runtime: Runtime,
-	ctx: ConsolidationCtx,
-	debugContext: (lane: "observer" | "maintenance") => Parameters<typeof withDebugLogContext>[0],
-): void {
-	if (runtime.maintenanceInFlight) return;
-	const entries = ctx.sessionManager.getBranch() as Entry[];
-	if (!stageDue(entries, runtime, realContextTokens(ctx), OM_REFLECTIONS_RECORDED, observedTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens)) return;
-	runtime.launchMaintenanceTask(ctx, () => withDebugLogContext(debugContext("maintenance"), () => runMaintenanceLane(pi, runtime, ctx)));
-}
-
-/** Launch each consolidation lane whose stage is due and whose lane is free. */
-function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
-	if (ctx.agent?.kind === "sub") return;
+/** Launch a consolidation run when any stage is due. Returns its promise, or undefined when nothing launched. */
+function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): Promise<void> | undefined {
+	if (ctx.agent?.kind === "sub") return undefined;
 	runtime.ensureConfig(ctx.cwd);
-	if (runtime.config.passive === true) return;
+	if (runtime.config.passive === true) return undefined;
+	if (runtime.consolidationInFlight) return undefined;
 
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	const observerDue = !runtime.observerInFlight
-		&& stageDue(entries, runtime, realContextTokens(ctx), OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens);
+	if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return undefined;
 
+	const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
 	const consolidationCtx: ConsolidationCtx = {
 		cwd: ctx.cwd,
 		hasUI: ctx.hasUI,
@@ -242,59 +230,35 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		getContextUsage: ctx.getContextUsage,
 		sessionManager: ctx.sessionManager,
 	};
+
 	const sessionMetadata = debugSessionMetadata(ctx);
-	const debugContext = (lane: "observer" | "maintenance") => ({
+	return runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({
 		enabled: runtime.config.debugLog === true,
 		cwd: ctx.cwd,
 		...sessionMetadata,
-		runId: `${lane}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`,
-	});
-
-	if (observerDue) {
-		runtime.launchObserverTask(ctx, async () => {
-			await withDebugLogContext(debugContext("observer"), () => runObserverLane(pi, runtime, consolidationCtx));
-			// New observations can make the reflector due; start it now instead of waiting for the next turn.
-			// An observer failure stops the pass, as the old sequential pipeline did.
-			if (runtime.lastObserverError === undefined) maybeLaunchMaintenance(pi, runtime, consolidationCtx, debugContext);
-		});
-	}
-	maybeLaunchMaintenance(pi, runtime, consolidationCtx, debugContext);
+		runId,
+	}, async () => {
+		await runConsolidationPipeline(pi, runtime, consolidationCtx);
+	}));
 }
 
-/**
- * Observer lane: the observer stage only. Never waits on, or is waited on by, the maintenance lane.
- * Drains the backlog chunk by chunk: a backlog bigger than one chunk cap would otherwise wait for the
- * next turn event per chunk and fall behind a fast-growing session. Each pass must advance coverage.
- */
-export async function runObserverLane(
+export async function runConsolidationPipeline(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
 ): Promise<void> {
 	const resolver = makeModelResolver(runtime, ctx);
+
+	runtime.consolidationPhase = "observer";
 	try {
-		for (;;) {
-			const before = latestCoverageIndex(ctx.sessionManager.getBranch() as Entry[], OM_OBSERVATIONS_RECORDED);
-			if ((await runObserverStage(pi, runtime, ctx, resolver)) === "abort") return;
-			const after = latestCoverageIndex(ctx.sessionManager.getBranch() as Entry[], OM_OBSERVATIONS_RECORDED);
-			if (after <= before) return;
-			// A compaction is waiting on this lane: stop at the chunk boundary so it can re-resolve its cut now.
-			if (runtime.compactHookInFlight) return;
-		}
+		const observerOutcome = await runObserverStage(pi, runtime, ctx, resolver);
+		if (observerOutcome === "abort") return;
 	} catch (error) {
 		debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
+		return;
 	}
-}
 
-/** Maintenance lane: reflector, then dropper only after a same-run reflection. */
-export async function runMaintenanceLane(
-	pi: ExtensionAPI,
-	runtime: Runtime,
-	ctx: ConsolidationCtx,
-): Promise<void> {
-	const resolver = makeModelResolver(runtime, ctx);
-
-	runtime.maintenancePhase = "reflector";
+	runtime.consolidationPhase = "reflector";
 	let reflectorResult: ReflectorStageResult;
 	try {
 		reflectorResult = await runReflectorStage(pi, runtime, ctx, resolver);
@@ -304,7 +268,7 @@ export async function runMaintenanceLane(
 		return;
 	}
 
-	runtime.maintenancePhase = "dropper";
+	runtime.consolidationPhase = "dropper";
 	try {
 		await runDropperStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
 	} catch (error) {

@@ -1,200 +1,36 @@
 import { describe, expect, it } from "vitest";
 
-import { renderFallbackSummary, renderSummary, renderSummaryWithBudget } from "../src/session-ledger/index.js";
-import { observation, observationsRecordedEntry, rawMessage, reflection } from "./fixtures/session.js";
+import { renderSummary } from "../src/session-ledger/index.js";
+import { observation, reflection } from "./fixtures/session.js";
 
 describe("session-ledger V3 summary rendering", () => {
 	it("renders empty memory as an empty summary", () => {
 		expect(renderSummary([], [])).toBe("");
 	});
 
-	it("keeps compacted-memory usage instructions", () => {
+	it("renders reflections with recallable ids", () => {
 		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { content: "User prefers source-backed memory." });
-
 		const summary = renderSummary([ref], []);
-
-		expect(summary).toContain("These are condensed memories from earlier in this session.");
-		expect(summary).toContain("use the om_recall tool");
+		expect(summary).toContain(`[${ref.id}] ${ref.content}`);
 	});
 
-	it("renders V3 reflections with ids", () => {
-		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { content: "User prefers source-backed memory." });
-
-		const summary = renderSummary([ref], []);
-
-		expect(summary).toContain("## Reflections\n[eeeeeeeeeeee] User prefers source-backed memory.");
-	});
-
-	it("renders V3 observations with ids, timestamps, relevance, and content", () => {
+	it("renders observations with ids, timestamps, relevance, and complete content", () => {
 		const obs = observation("aaaaaaaaaaaa", {
-			content: "User confirmed recall should use exact source entry ids.",
+			content: `User confirmed recall should use exact source entry ids. ${"source details ".repeat(1000)} Final decision.`,
 			timestamp: "2026-05-02 10:30",
 			relevance: "high",
 		});
-
 		const summary = renderSummary([], [obs]);
-
-		expect(summary).toContain(
-			"## Observations\n[aaaaaaaaaaaa] 2026-05-02 10:30 [high] User confirmed recall should use exact source entry ids.",
-		);
+		expect(summary).toContain(`[${obs.id}] ${obs.timestamp} [${obs.relevance}] ${obs.content}`);
 	});
 
 	it("keeps raw provenance metadata out of the compact summary", () => {
 		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["entry-user", "entry-tool"] });
-		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
-
+		const ref = reflection("eeeeeeeeeeee", [obs.id]);
 		const summary = renderSummary([ref], [obs]);
-
 		expect(summary).not.toContain("sourceEntryIds");
 		expect(summary).not.toContain("supportingObservationIds");
 		expect(summary).not.toContain("entry-user");
 		expect(summary).not.toContain("entry-tool");
-		expect(summary).not.toContain("legacy");
-		expect(summary).not.toContain("[object Object]");
-	});
-});
-
-describe("budgeted summary rendering", () => {
-	const reflections = ["e1", "e2", "e3"].map((id, i) => reflection(id.padEnd(12, "e"), ["aaaaaaaaaaaa"], { content: `Reflection ${i + 1} ${"r".repeat(120)}` }));
-	const observations = ["a1", "a2", "a3", "a4"].map((id, i) => observation(id.padEnd(12, "a"), { content: `Observation ${i + 1} ${"o".repeat(120)}` }));
-
-	it("renders everything when no budget is given", () => {
-		const rendered = renderSummaryWithBudget(reflections, observations);
-
-		expect(rendered.reflections).toHaveLength(3);
-		expect(rendered.observations).toHaveLength(4);
-		expect(rendered.omittedObservations).toBe(0);
-		expect(rendered.text).not.toContain("omitted");
-	});
-
-	it("keeps all reflections and the newest observations that fit when reflections are small", () => {
-		// Fixed overhead ~275 tokens, each line ~38 tokens. Budget 500 leaves
-		// ~225: observations reserve half (2 lines), reflections take the rest
-		// (3 lines fit), observations reclaim nothing more.
-		const rendered = renderSummaryWithBudget(reflections, observations, { maxTokens: 500 });
-
-		expect(rendered.reflections).toHaveLength(3);
-		expect(rendered.observations.map((obs) => obs.id)).toEqual(["a3aaaaaaaaaa", "a4aaaaaaaaaa"]);
-		expect(rendered.omittedReflections).toBe(0);
-		expect(rendered.omittedObservations).toBe(2);
-		expect(rendered.text).toContain("(2 older observations omitted to fit the summary budget");
-		expect(rendered.text).toContain("[a4aaaaaaaaaa]");
-		expect(rendered.text).not.toContain("[a1aaaaaaaaaa]");
-	});
-
-	it("guarantees observations at least half the budget when reflections are verbose", () => {
-		const verbose = ["e1", "e2", "e3", "e4", "e5", "e6"].map((id, i) => reflection(id.padEnd(12, "e"), ["aaaaaaaaaaaa"], { content: `Reflection ${i + 1} ${"r".repeat(400)}` }));
-		// ~225 tokens of lines: observations get >= 112 (2 lines), reflections the rest (1 line of ~105).
-		const rendered = renderSummaryWithBudget(verbose, observations, { maxTokens: 500 });
-
-		expect(rendered.observations.length).toBeGreaterThanOrEqual(2);
-		expect(rendered.observations.at(-1)?.id).toBe("a4aaaaaaaaaa");
-		expect(rendered.reflections.length).toBeGreaterThanOrEqual(1);
-		expect(rendered.reflections.at(-1)?.id).toBe("e6eeeeeeeeee");
-		expect(rendered.omittedReflections).toBeGreaterThan(0);
-		expect(rendered.text).toContain("older reflection");
-	});
-
-	it("lets reflections use budget observations leave unused", () => {
-		const oneObservation = observations.slice(0, 1);
-		const rendered = renderSummaryWithBudget(reflections, oneObservation, { maxTokens: 500 });
-
-		expect(rendered.observations).toHaveLength(1);
-		expect(rendered.reflections).toHaveLength(3);
-	});
-
-	it("ignores a non-positive budget", () => {
-		expect(renderSummary(reflections, observations, { maxTokens: 0 })).toBe(renderSummary(reflections, observations));
-	});
-});
-
-describe("oversized newest record (PR #81 review, issue 3)", () => {
-	it("still keeps a shorter older observation that fits", () => {
-		const older = observation("a1aaaaaaaaaa", { content: "Short older fact." });
-		const newest = observation("a2aaaaaaaaaa", { content: "x".repeat(4000) });
-
-		const rendered = renderSummaryWithBudget([], [older, newest], { maxTokens: 500 });
-
-		expect(rendered.observations.map((obs) => obs.id)).toEqual(["a1aaaaaaaaaa"]);
-		expect(rendered.text).toContain("[a1aaaaaaaaaa] ");
-		expect(rendered.text).toContain("Short older fact.");
-	});
-});
-
-describe("renderFallbackSummary", () => {
-	const coverage = (id: string, coversUpToId: string, records: ReturnType<typeof observation>[]) =>
-		observationsRecordedEntry(id, { observations: records, coversUpToId });
-	const estimate = (text: string) => Math.ceil(text.length / 4);
-
-	it("truncates a single record over budget into a non-empty summary", () => {
-		const huge = observation("dddddddddddd", { content: "x".repeat(8000) });
-		const entries = [rawMessage("u0", "hello"), coverage("om-0", "u0", [huge]), rawMessage("u1", "next")];
-
-		const summary = renderFallbackSummary(entries, "u1", { maxTokens: 500 });
-
-		expect(summary.length).toBeGreaterThan(0);
-		expect(summary).toContain("[dddddddddddd]");
-		expect(summary).toContain("…");
-		expect(estimate(summary)).toBeLessThanOrEqual(500);
-	});
-
-	it("renders a fixed no-memory notice when the ledger is empty", () => {
-		const entries = [rawMessage("u0", "hello"), rawMessage("u1", "next")];
-
-		const summary = renderFallbackSummary(entries, "u1", { maxTokens: 500 });
-
-		expect(summary).toContain("No observational memory was recorded");
-		expect(summary).not.toContain("## Observations");
-	});
-
-	it("lists unobserved source with a count, approximate tokens and user-message excerpts", () => {
-		const obs = observation("aaaaaaaaaaaa", { content: "Observed fact." });
-		const entries = [
-			rawMessage("u0", "first request"),
-			coverage("om-0", "u0", [obs]),
-			rawMessage("u1", "y".repeat(1000)),
-			rawMessage("u2", "please refactor the parser module"),
-			rawMessage("u3", "kept tail"),
-		];
-
-		const summary = renderFallbackSummary(entries, "u3", { maxTokens: 800 });
-
-		expect(summary).toContain("[aaaaaaaaaaaa]");
-		expect(summary).toMatch(/2 source entries \(~\d+ tokens\)/);
-		expect(summary).toContain("please refactor the parser module");
-		expect(summary).not.toContain("y".repeat(300));
-		expect(summary.indexOf("[aaaaaaaaaaaa]")).toBeLessThan(summary.indexOf("please refactor"));
-		expect(estimate(summary)).toBeLessThanOrEqual(800);
-	});
-
-	it("keeps the newest unobserved user message nearly whole while older ones stay short", () => {
-		const latest = `${"start of the current task. ".repeat(3)}${"detail ".repeat(200)}final sentence of the request`;
-		const entries = [
-			rawMessage("u0", "first request"),
-			coverage("om-0", "u0", [observation("aaaaaaaaaaaa", { content: "Observed fact." })]),
-			rawMessage("u1", "o".repeat(1000)),
-			rawMessage("u2", latest),
-			rawMessage("u3", "kept tail"),
-		];
-
-		const summary = renderFallbackSummary(entries, "u3", { maxTokens: 4000 });
-
-		expect(summary).toContain("final sentence of the request");
-		expect(summary).not.toContain("o".repeat(300));
-	});
-
-	it("is deterministic and stays within a small budget", () => {
-		const entries = [
-			rawMessage("u0", "z".repeat(4000)),
-			coverage("om-0", "u0", [observation("aaaaaaaaaaaa", { content: "w".repeat(2000) })]),
-			rawMessage("u1", "v".repeat(4000)),
-			rawMessage("u2", "end"),
-		];
-
-		const first = renderFallbackSummary(entries, "u2", { maxTokens: 120 });
-
-		expect(renderFallbackSummary(entries, "u2", { maxTokens: 120 })).toBe(first);
-		expect(estimate(first)).toBeLessThanOrEqual(120);
-		expect(first.length).toBeGreaterThan(0);
 	});
 });

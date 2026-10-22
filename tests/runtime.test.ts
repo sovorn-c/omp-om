@@ -258,50 +258,23 @@ describe("Runtime single-model resolution", () => {
 });
 
 describe("Runtime task state", () => {
-	it("tracks observer lane task state", async () => {
+	it("tracks consolidation task state", async () => {
 		const runtime = new Runtime();
 		const { promise: work, resolve: release } = Promise.withResolvers<void>();
 
-		const promise = runtime.launchObserverTask({ hasUI: false }, () => work);
-
-		expect(runtime.observerInFlight).toBe(true);
-		expect(runtime.observerPromise).toBe(promise);
-		release();
-		await promise;
-		expect(runtime.observerInFlight).toBe(false);
-		expect(runtime.observerPromise).toBeNull();
-	});
-
-	it("tracks maintenance lane task state and clears its phase on finish", async () => {
-		const runtime = new Runtime();
-		const { promise: work, resolve: release } = Promise.withResolvers<void>();
-
-		const promise = runtime.launchMaintenanceTask({ hasUI: false }, async () => {
-			runtime.maintenancePhase = "dropper";
+		const promise = runtime.launchConsolidationTask({ hasUI: false }, async () => {
+			runtime.consolidationPhase = "observer";
 			await work;
 		});
 
-		expect(runtime.maintenanceInFlight).toBe(true);
-		expect(runtime.maintenancePromise).toBe(promise);
-		expect(runtime.maintenancePhase).toBe("dropper");
+		expect(runtime.consolidationInFlight).toBe(true);
+		expect(runtime.consolidationPromise).toBe(promise);
+		expect(runtime.consolidationPhase).toBe("observer");
 		release();
 		await promise;
-		expect(runtime.maintenanceInFlight).toBe(false);
-		expect(runtime.maintenancePromise).toBeNull();
-		expect(runtime.maintenancePhase).toBeUndefined();
-	});
-
-	it("attributes an uncaught maintenance error to the maintenance phase, not the observer", async () => {
-		const runtime = new Runtime();
-		const notify = vi.fn();
-
-		await runtime.launchMaintenanceTask({ hasUI: true, ui: { notify } }, async () => {
-			runtime.maintenancePhase = "dropper";
-			throw new Error("drop exploded");
-		});
-
-		expect(runtime.lastDropperError).toBe("drop exploded");
-		expect(runtime.lastObserverError).toBeUndefined();
+		expect(runtime.consolidationInFlight).toBe(false);
+		expect(runtime.consolidationPromise).toBeNull();
+		expect(runtime.consolidationPhase).toBeUndefined();
 	});
 
 	it("records stage-specific consolidation errors", () => {
@@ -320,8 +293,7 @@ describe("Runtime task state", () => {
 	it("keeps the compaction hook flag independent of consolidation", () => {
 		const runtime = new Runtime();
 		runtime.compactHookInFlight = true;
-		expect(runtime.observerInFlight).toBe(false);
-		expect(runtime.maintenanceInFlight).toBe(false);
-		expect(runtime.maintenancePhase).toBeUndefined();
+		expect(runtime.consolidationInFlight).toBe(false);
+		expect(runtime.consolidationPhase).toBeUndefined();
 	});
 });

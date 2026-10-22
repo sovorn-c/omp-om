@@ -41,10 +41,6 @@ beforeEach(() => {
 	mockAgents.runDropper.mockResolvedValue(undefined);
 });
 
-function laneLaunches(runtime: Record<"launchObserverTask" | "launchMaintenanceTask", { mock: { calls: unknown[] } }>): number {
-	return runtime.launchObserverTask.mock.calls.length + runtime.launchMaintenanceTask.mock.calls.length;
-}
-
 function setup(args: {
 	entries: TestEntry[];
 	observeAfterTokens?: number;
@@ -55,8 +51,7 @@ function setup(args: {
 	workerMemoryMaxTokens?: number;
 	showWorkerNotifications?: boolean;
 	passive?: boolean;
-	observerInFlight?: boolean;
-	maintenanceInFlight?: boolean;
+	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
 	sessionId?: string;
 }) {
@@ -73,7 +68,8 @@ function setup(args: {
 			return args.appendEntryReturnsId === false ? undefined : id;
 		}),
 	};
-	const queued: Array<{ lane: "observer" | "maintenance"; work: () => Promise<void> }> = [];
+	let launchedWork: (() => Promise<void>) | undefined;
+	let resolveLaunched: (() => void) | undefined;
 	const runtime = {
 		config: {
 			showWorkerNotifications: args.showWorkerNotifications ?? true,
@@ -89,24 +85,24 @@ function setup(args: {
 			agentMaxTokens: 32000,
 			model: "@smol",
 		},
-		observerInFlight: args.observerInFlight ?? false,
-		maintenanceInFlight: args.maintenanceInFlight ?? false,
-		maintenancePhase: undefined as "reflector" | "dropper" | undefined,
+		consolidationInFlight: args.consolidationInFlight ?? false,
+		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
 		memoryFailureReason: undefined as string | undefined,
 		lastObserverError: undefined as string | undefined,
 		lastReflectorError: undefined as string | undefined,
 		lastDropperError: undefined as string | undefined,
 		ensureConfig: vi.fn(),
 		resolveModel: vi.fn(async () => ({ ok: true, model: { reasoning: true }, apiKey: "key", headers: { h: "v" } })),
-		launchObserverTask: vi.fn((_ctx, work: () => Promise<void>) => {
-			runtime.observerInFlight = true;
-			queued.push({ lane: "observer", work });
-			return Promise.resolve();
-		}),
-		launchMaintenanceTask: vi.fn((_ctx, work: () => Promise<void>) => {
-			runtime.maintenanceInFlight = true;
-			queued.push({ lane: "maintenance", work });
-			return Promise.resolve();
+		launchConsolidationTask: vi.fn((_ctx, work) => {
+			runtime.consolidationInFlight = true;
+			launchedWork = work;
+			// Resolve when the test drives the work via runLaunchedWork().
+			return new Promise<void>((resolve) => {
+				resolveLaunched = () => {
+					runtime.consolidationInFlight = false;
+					resolve();
+				};
+			});
 		}),
 		recordConsolidationStageError: vi.fn((ctx, phase: "observer" | "reflector" | "dropper", error: unknown) => {
 			const message = error instanceof Error ? error.message : String(error);
@@ -138,19 +134,11 @@ function setup(args: {
 		fire: (eventName = "turn_end") => handlers[eventName]!(undefined, ctx),
 		fireAgentStart: () => handlers.agent_start!(undefined, ctx),
 		fireTurnEnd: () => handlers.turn_end!(undefined, ctx),
-		runLaunchedWork: async (lane?: "observer" | "maintenance") => {
-			const matches = (item: { lane: "observer" | "maintenance" }) => lane === undefined || item.lane === lane;
-			for (let next = queued.findIndex(matches); next !== -1; next = queued.findIndex(matches)) {
-				const item = queued.splice(next, 1)[0]!;
-				try {
-					await item.work();
-				} finally {
-					if (item.lane === "observer") runtime.observerInFlight = false;
-					else {
-						runtime.maintenanceInFlight = false;
-						runtime.maintenancePhase = undefined;
-					}
-				}
+		runLaunchedWork: async () => {
+			try {
+				await launchedWork?.();
+			} finally {
+				resolveLaunched?.();
 			}
 		},
 		addEntries: (...more: TestEntry[]) => {
@@ -188,7 +176,7 @@ describe("V3 consolidation trigger", () => {
 		fireAgentStart();
 		fireTurnEnd();
 
-		expect(laneLaunches(runtime)).toBe(0);
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
 	it("does not launch from either entrypoint in passive mode", () => {
@@ -198,17 +186,17 @@ describe("V3 consolidation trigger", () => {
 		passive.fireAgentStart();
 		passive.fireTurnEnd();
 
-		expect(laneLaunches(passive.runtime)).toBe(0);
+		expect(passive.runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
-	it("does not launch the observer lane from either entrypoint while it is in flight", () => {
+	it("does not launch from either entrypoint while consolidation is already in flight", () => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const locked = setup({ entries, observerInFlight: true });
+		const locked = setup({ entries, consolidationInFlight: true });
 
 		locked.fireAgentStart();
 		locked.fireTurnEnd();
 
-		expect(laneLaunches(locked.runtime)).toBe(0);
+		expect(locked.runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
 	it("launches on a due raw backlog even when provider growth since the last compaction is below the threshold", () => {
@@ -230,7 +218,7 @@ describe("V3 consolidation trigger", () => {
 
 		fireTurnEnd();
 
-		expect(laneLaunches(runtime)).toBe(1);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not launch when both the raw backlog and provider growth are below the threshold", () => {
@@ -248,7 +236,7 @@ describe("V3 consolidation trigger", () => {
 
 		fireTurnEnd();
 
-		expect(laneLaunches(runtime)).toBe(0);
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
 	it("does not launch at session start when only the system prompt fills the context", () => {
@@ -261,7 +249,7 @@ describe("V3 consolidation trigger", () => {
 		fireAgentStart();
 		fireTurnEnd();
 
-		expect(laneLaunches(runtime)).toBe(0);
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
 	it("does not launch in subagent sessions", () => {
@@ -272,7 +260,7 @@ describe("V3 consolidation trigger", () => {
 		fireAgentStart();
 		fireTurnEnd();
 
-		expect(laneLaunches(runtime)).toBe(0);
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
 	it("still launches in the main agent session", () => {
@@ -282,7 +270,7 @@ describe("V3 consolidation trigger", () => {
 
 		fireTurnEnd();
 
-		expect(laneLaunches(runtime)).toBe(1);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
 	});
 
 	it("launches from agent_start when work is due", () => {
@@ -291,7 +279,7 @@ describe("V3 consolidation trigger", () => {
 
 		fireAgentStart();
 
-		expect(laneLaunches(runtime)).toBe(1);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
 	});
 
 	it("uses the shared lock when agent_start fires before turn_end", () => {
@@ -301,7 +289,7 @@ describe("V3 consolidation trigger", () => {
 		fireAgentStart();
 		fireTurnEnd();
 
-		expect(laneLaunches(runtime)).toBe(1);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
 	});
 
 	it("uses the shared lock when turn_end fires before agent_start", () => {
@@ -311,7 +299,7 @@ describe("V3 consolidation trigger", () => {
 		fireTurnEnd();
 		fireAgentStart();
 
-		expect(laneLaunches(runtime)).toBe(1);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
 	});
 
 	it("runs observer first and appends source-addressed observations", async () => {
@@ -323,7 +311,7 @@ describe("V3 consolidation trigger", () => {
 		fire();
 		await runLaunchedWork();
 
-		expect(laneLaunches(runtime)).toBeGreaterThan(0);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalled();
 		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
 			allowedSourceEntryIds: ["raw-1"],
 			maxTurns: 9,
@@ -498,8 +486,6 @@ describe("V3 consolidation trigger", () => {
 
 		quiet.fire();
 		await quiet.runLaunchedWork();
-		quiet.fire();
-		await quiet.runLaunchedWork();
 
 		expect(mockAgents.runObserver).toHaveBeenCalledOnce();
 		expect(mockAgents.runReflector).toHaveBeenCalledOnce();
@@ -557,13 +543,15 @@ describe("V3 consolidation trigger", () => {
 
 		// Same span, only 5 new tokens (< observeAfterTokens more): no re-fire.
 		addEntries(textCustomMessage("raw-2", "b".repeat(20)));
+		runtime.consolidationInFlight = false;
 		fire();
-		expect(laneLaunches(runtime)).toBe(2);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(2);
 		await runLaunchedWork();
 		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
 
 		// 10 more new tokens: backoff satisfied, observer re-fires over the grown span.
 		addEntries(textCustomMessage("raw-3", "c".repeat(40)));
+		runtime.consolidationInFlight = false;
 		mockAgents.runObserver.mockResolvedValueOnce([obsA]);
 		fire();
 		await runLaunchedWork();
@@ -583,6 +571,7 @@ describe("V3 consolidation trigger", () => {
 		await runLaunchedWork();
 		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
 
+		runtime.consolidationInFlight = false;
 		setSessionId("session-2");
 		fire();
 		await runLaunchedWork();
@@ -621,7 +610,7 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 	});
 
-	it("starts the reflector as soon as an observer append makes it due, without another event", async () => {
+	it("re-reads branch so observer append can unblock reflector in the same consolidation run", async () => {
 		mockAgents.runObserver.mockResolvedValueOnce([obsA]);
 		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
 		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
@@ -687,7 +676,7 @@ describe("V3 consolidation trigger", () => {
 
 		fire();
 
-		expect(laneLaunches(runtime)).toBe(0);
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
 	it("waits for successful reflection even when active observation pool is over target", async () => {
@@ -701,7 +690,7 @@ describe("V3 consolidation trigger", () => {
 		fire();
 		await runLaunchedWork();
 
-		expect(laneLaunches(runtime)).toBe(1);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
 		expect(mockAgents.runReflector).toHaveBeenCalled();
 		expect(mockAgents.runDropper).not.toHaveBeenCalled();
 	});
@@ -719,7 +708,7 @@ describe("V3 consolidation trigger", () => {
 
 		fire();
 
-		expect(laneLaunches(runtime)).toBe(0);
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
 	it("uses same-run reflection coverage for drop coverage", async () => {
@@ -857,11 +846,10 @@ describe("V3 consolidation trigger", () => {
 });
 
 describe("observer chunk cap", () => {
-	it("caps each chunk but drains an oversized backlog within one launch", async () => {
+	it("caps an oversized backlog to one chunk per run, advancing across runs", async () => {
 		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
 		const second = observation("222222222222", { sourceEntryIds: ["raw-2"], tokenCount: 4 });
-		const third = observation("333333333333", { sourceEntryIds: ["raw-3"], tokenCount: 4 });
-		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce([second]).mockResolvedValueOnce([third]);
+		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce([second]);
 		const entries = [
 			textCustomMessage("raw-1", "a".repeat(800)),
 			textCustomMessage("raw-2", "b".repeat(800)),
@@ -872,45 +860,17 @@ describe("observer chunk cap", () => {
 		fire();
 		await runLaunchedWork();
 
-		// Each chunk holds one entry; coverage advances chunk by chunk without another turn event.
+		// Only the oldest entry fits under the cap; coverage advances to it, not to the backlog tail.
 		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(1, expect.objectContaining({ allowedSourceEntryIds: ["raw-1"] }));
-		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(2, expect.objectContaining({ allowedSourceEntryIds: ["raw-2"] }));
-		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(3, expect.objectContaining({ allowedSourceEntryIds: ["raw-3"] }));
 		expect(pi.appendEntry).toHaveBeenNthCalledWith(1, OM_OBSERVATIONS_RECORDED, { observations: [first], coversUpToId: "raw-1" });
-		expect(pi.appendEntry).toHaveBeenNthCalledWith(3, OM_OBSERVATIONS_RECORDED, { observations: [third], coversUpToId: "raw-3" });
-		expect(runtime.launchObserverTask).toHaveBeenCalledTimes(1);
-	});
 
-	it("stops draining at a chunk boundary while a compaction waits on the observer", async () => {
-		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
-		mockAgents.runObserver.mockResolvedValueOnce([first]);
-		const entries = [
-			textCustomMessage("raw-1", "a".repeat(800)),
-			textCustomMessage("raw-2", "b".repeat(800)),
-		];
-		const { fire, runLaunchedWork, runtime } = setup({ entries, observerChunkMaxTokens: 256, reflectAfterTokens: 999 });
-		Object.assign(runtime, { compactHookInFlight: true });
-
+		// The next run continues from the advanced coverage.
+		runtime.consolidationInFlight = false;
 		fire();
 		await runLaunchedWork();
 
-		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
-	});
-
-	it("stops draining when a chunk records nothing", async () => {
-		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
-		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce(undefined);
-		const entries = [
-			textCustomMessage("raw-1", "a".repeat(800)),
-			textCustomMessage("raw-2", "b".repeat(800)),
-			textCustomMessage("raw-3", "c".repeat(800)),
-		];
-		const { fire, runLaunchedWork } = setup({ entries, observerChunkMaxTokens: 256, reflectAfterTokens: 999 });
-
-		fire();
-		await runLaunchedWork();
-
-		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
+		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(2, expect.objectContaining({ allowedSourceEntryIds: ["raw-2"] }));
+		expect(pi.appendEntry).toHaveBeenNthCalledWith(2, OM_OBSERVATIONS_RECORDED, { observations: [second], coversUpToId: "raw-2" });
 	});
 
 	it("bounds one oversized tool result, preserves provenance, and continues on the next run", async () => {
@@ -950,6 +910,7 @@ describe("observer chunk cap", () => {
 
 		// The source id still points at the full ledger entry; the next run starts
 		// after it instead of retrying the oversized input forever.
+		runtime.consolidationInFlight = false;
 		fire();
 		await runLaunchedWork();
 
@@ -993,60 +954,5 @@ describe("bounded worker memory in consolidation", () => {
 		const args = mockAgents.runObserver.mock.calls[0][0];
 		expect(args.priorObservations).toHaveLength(1);
 		expect(args.priorObservations[0]).toContain("[a3aaaaaaaaaa]");
-	});
-});
-
-describe("two-lane consolidation", () => {
-	const obsA = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"], tokenCount: 10 });
-	const obsB = observation("bbbbbbbbbbbb", { sourceEntryIds: ["raw-2"], tokenCount: 10 });
-
-	it("records observations while a maintenance pass is blocked on a reflector that never resolves", async () => {
-		mockAgents.runReflector.mockReturnValueOnce(new Promise<never>(() => {}));
-		mockAgents.runObserver.mockResolvedValueOnce([obsB]);
-		const entries = [
-			textCustomMessage("raw-1", "aaaaaaaa"),
-			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
-		];
-		const { fire, runLaunchedWork, pi, addEntries, runtime } = setup({ entries, observeAfterTokens: 1, reflectAfterTokens: 1 });
-
-		fire();
-		expect(runtime.maintenanceInFlight).toBe(true);
-		expect(runtime.launchObserverTask).not.toHaveBeenCalled();
-
-		addEntries(textCustomMessage("raw-2", "bbbbbbbb"));
-		fire();
-		expect(runtime.launchObserverTask).toHaveBeenCalledTimes(1);
-		void runLaunchedWork("maintenance");
-		await runLaunchedWork("observer");
-
-		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
-		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obsB], coversUpToId: "raw-2" });
-		expect(runtime.maintenanceInFlight).toBe(true);
-	});
-
-	it("never runs two observers at once", async () => {
-		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const { fire, runLaunchedWork, addEntries, runtime } = setup({ entries, reflectAfterTokens: 999 });
-
-		fire();
-		addEntries(textCustomMessage("raw-2", "bbbbbbbb"));
-		fire();
-
-		expect(runtime.launchObserverTask).toHaveBeenCalledTimes(1);
-		await runLaunchedWork();
-		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
-	});
-
-	it("never runs two maintenance passes at once", async () => {
-		const entries = [
-			textCustomMessage("raw-1", "aaaaaaaa"),
-			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
-		];
-		const { fire, runtime } = setup({ entries, observeAfterTokens: 999, reflectAfterTokens: 1 });
-
-		fire();
-		fire();
-
-		expect(runtime.launchMaintenanceTask).toHaveBeenCalledTimes(1);
 	});
 });

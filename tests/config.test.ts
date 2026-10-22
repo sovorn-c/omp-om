@@ -39,24 +39,6 @@ describe("omp-om config", () => {
 		expect(config).toEqual(DEFAULTS);
 	});
 
-	it("keeps the Pi OM trigger defaults and drops the removed keys", () => {
-		expect(DEFAULTS).toEqual({
-			observeAfterTokens: 10000,
-			reflectAfterTokens: 20000,
-			observationsPoolMaxTokens: 20000,
-			observationsPoolTargetTokens: 10000,
-			agentMaxTurns: 16,
-			agentMaxTokens: 32000,
-			compactionCatchUpMaxChunks: 2,
-			compactionMaxRetainedTokens: 30000,
-			compactionSummaryMaxTokens: 25000,
-			model: "@smol",
-			showWorkerNotifications: true,
-			passive: false,
-			debugLog: false,
-		});
-	});
-
 	it("reads the global file from the agent dir", () => {
 		writeJson(globalPath, { model: "anthropic/claude-haiku-4-5", observeAfterTokens: 50 });
 
@@ -118,23 +100,26 @@ describe("omp-om config", () => {
 		expect(warnings).toHaveLength(1);
 	});
 
-	it("removed keys (compactAfterTokens, consolidateWhenIdle) are ignored with a warning", () => {
+	it("removed trigger and compaction settings are ignored with a warning", () => {
 		writeJson(globalPath, {
 			compactAfterTokens: 30,
 			compactAfterTokensMode: "ratio",
 			compactAfterTokensRatio: 0.5,
 			consolidateWhenIdle: true,
 			fallbackModel: { provider: "openai", id: "x" },
+			compactionCatchUpMaxChunks: 0,
+			compactionMaxRetainedTokens: 30000,
+			compactionSummaryMaxTokens: 25000,
 			observeAfterTokens: 77,
 		});
 
 		const { config, warnings } = loadConfig(cwd, agentDir, {});
 
 		expect(config).toEqual({ ...DEFAULTS, observeAfterTokens: 77 });
-		for (const key of ["compactAfterTokens", "compactAfterTokensMode", "compactAfterTokensRatio", "consolidateWhenIdle", "fallbackModel"]) {
+		for (const key of ["compactAfterTokens", "compactAfterTokensMode", "compactAfterTokensRatio", "consolidateWhenIdle", "fallbackModel", "compactionCatchUpMaxChunks", "compactionMaxRetainedTokens", "compactionSummaryMaxTokens"]) {
 			expect(warnings.some((warning) => warning.includes(`"${key}"`))).toBe(true);
 		}
-		expect(warnings).toHaveLength(5);
+		expect(warnings).toHaveLength(8);
 	});
 
 	it("rejects a non-string model with a warning and keeps the lower layer's model", () => {
@@ -164,19 +149,12 @@ describe("omp-om config", () => {
 			observationsPoolMaxTokens: "20000",
 			observationsPoolTargetTokens: "10000",
 			agentMaxTurns: null,
-			compactionCatchUpMaxChunks: -1,
 			showWorkerNotifications: "no",
 			passive: "yes",
 			debugLog: "true",
 		});
 
 		expect(loadConfig(cwd, agentDir, {}).config).toEqual(DEFAULTS);
-	});
-
-	it("accepts compactionCatchUpMaxChunks of 0 to disable catch-up", () => {
-		writeJson(globalPath, { compactionCatchUpMaxChunks: 0 });
-
-		expect(loadConfig(cwd, agentDir, {}).config.compactionCatchUpMaxChunks).toBe(0);
 	});
 
 	it("derives observation pool target from the final max when omitted", () => {

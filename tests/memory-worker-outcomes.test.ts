@@ -13,7 +13,7 @@ vi.mock("../src/agents/agent-loop.js", async (original) => ({
 }));
 
 import { Runtime } from "../src/runtime.js";
-import { runMaintenanceLane, runObserverLane } from "../src/hooks/consolidation-trigger.js";
+import { runConsolidationPipeline } from "../src/hooks/consolidation-trigger.js";
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
 
 const partialFailure: WorkerAgentLoop = (_prompts, context) => ({
@@ -42,17 +42,14 @@ function setup(entries: TestEntry[] = [rawMessage("raw-1", "Deploy to eu-west-1"
 	registerCompactionHook(extension, runtime);
 	return {
 		runtime, ctx, pi,
-		consolidate: async () => {
-			await runtime.launchObserverTask(ctx, () => runObserverLane(extension, runtime, ctx));
-			await runtime.launchMaintenanceTask(ctx, () => runMaintenanceLane(extension, runtime, ctx));
-		},
+		consolidate: () => runtime.launchConsolidationTask(ctx, () => runConsolidationPipeline(extension, runtime, ctx)),
 		compact: () => compact({ preparation: { firstKeptEntryId: "raw-2", tokensBefore: 1000 }, branchEntries: entries } as unknown as SessionBeforeCompactEvent, ctx as unknown as OmpExtensionContext),
 	};
 }
 
 beforeEach(() => loop.mockReset().mockImplementation(partialFailure));
 
-describe("real worker outcomes preserve native fallback", () => {
+describe("real background worker outcomes", () => {
 	it("keeps an outage when bounded reflector input skips the request", async () => {
 		const app = setup([
 			rawMessage("raw-1", "Deploy to eu-west-1"),
@@ -76,11 +73,4 @@ describe("real worker outcomes preserve native fallback", () => {
 		await expect(app.compact()).resolves.toBeUndefined();
 	});
 
-	it("delegates catch-up compaction without coverage after tool output followed by provider failure", async () => {
-		const app = setup();
-		await expect(app.compact()).resolves.toBeUndefined();
-		expect(app.pi.appendEntry).not.toHaveBeenCalled();
-		expect(app.runtime.memoryFailureReason).toContain("provider disconnected after tool output");
-		expect(app.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("normal compaction"), "warning");
-	});
 });

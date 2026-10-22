@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import type { OmpExtensionContext, Runtime } from "../src/runtime.js";
+import type { MemoryDetails } from "../src/session-ledger/index.js";
 import {
 	compactionEntry,
 	memoryDetails,
@@ -15,157 +18,132 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
+type HookResult = {
+	compaction?: { summary: string; firstKeptEntryId: string; tokensBefore: number; details?: MemoryDetails };
+	cancel?: boolean;
+} | undefined;
+
 function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number; compactHookInFlight?: boolean }) {
-	let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+	let handler: ((event: SessionBeforeCompactEvent, ctx: OmpExtensionContext) => Promise<HookResult>) | undefined;
 	const pi = {
-		on: vi.fn((eventName: string, cb: typeof handler) => {
-			expect(eventName).toBe("session_before_compact");
-			handler = cb;
-		}),
+		on: vi.fn((_eventName: string, cb: typeof handler) => { handler = cb; }),
 		appendEntry: vi.fn(),
 	};
 	const runtime = {
-		config: {
-			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 20_000,
-		},
+		config: { observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 20_000 },
 		compactHookInFlight: args.compactHookInFlight ?? false,
-		observerPromise: new Promise(() => {}),
-		resolveModel: vi.fn(async () => ({ ok: true, model: { contextWindow: 65536 }, apiKey: "test" })),
+		consolidationInFlight: true,
+		consolidationPromise: new Promise<void>(() => {}),
+		memoryFailureReason: "background model unavailable",
+		resolveModel: vi.fn(() => new Promise<never>(() => {})),
 		ensureConfig: vi.fn(),
 	};
-	registerCompactionHook(pi as any, runtime as any);
+	// Fixtures implement the registration and runtime surfaces the hook consumes.
+	const extension = pi as unknown as ExtensionAPI;
+	const hookRuntime = runtime as unknown as Runtime;
+	registerCompactionHook(extension, hookRuntime);
 	if (!handler) throw new Error("compaction handler was not registered");
+	const compact = handler;
 	const ctx = {
 		cwd: "/tmp/project",
 		hasUI: true,
 		ui: { notify: vi.fn() },
-		sessionManager: { getBranch: vi.fn(() => args.entries) },
+		sessionManager: { getBranch: vi.fn(() => { throw new Error("must use event snapshot"); }) },
 	};
-	const run = (firstKeptEntryId = args.entries.at(-1)?.id ?? "missing") => handler!({
-		preparation: { firstKeptEntryId, tokensBefore: 123 },
-		branchEntries: args.entries,
-		signal: undefined,
-	}, ctx);
+	// Only preparation, branch entries and cancellation are relevant to these scenarios.
+	const context = ctx as unknown as OmpExtensionContext;
+	const run = (firstKeptEntryId = args.entries.at(-1)?.id ?? "missing") => {
+		const event = { preparation: { firstKeptEntryId, tokensBefore: 123 }, branchEntries: args.entries } as unknown as SessionBeforeCompactEvent;
+		return compact(event, context);
+	};
 	return { pi, runtime, ctx, run };
 }
 
+function replacement(result: HookResult) {
+	if (!result?.compaction) throw new Error("expected memory compaction");
+	return result.compaction;
+}
+
 describe("V3 compaction hook", () => {
-	it("renders a fixed no-memory summary instead of declining when there is no V3 memory", async () => {
-		const entries = [textCustomMessage("raw-1", "aaaa")];
-		const { run, runtime, pi } = setup({ entries });
-
-		const result = await run("raw-1") as any;
-
-		expect(result.compaction.firstKeptEntryId).toBe("raw-1");
-		expect(result.compaction.tokensBefore).toBe(123);
-		expect(result.compaction.summary).toContain("No observational memory was recorded");
+	it("declines ownership when there is no V3 memory", async () => {
+		const { run, runtime, pi } = setup({ entries: [textCustomMessage("raw-1", "aaaa")] });
+		await expect(run("raw-1")).resolves.toBeUndefined();
+		expect(runtime.resolveModel).not.toHaveBeenCalled();
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(runtime.compactHookInFlight).toBe(false);
 	});
 
-	it("first normal compaction writes covered observations without orphan reflections", async () => {
-		const obs1 = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"], tokenCount: 10 });
-		const ref1 = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+	it("renders the existing snapshot without waiting for workers or model resolution, keeping omp's cut", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"], tokenCount: 10 });
 		const entries = [
-			textCustomMessage("raw-1", "aaaa"),
-			observationsRecordedEntry("om-aaaaaaaaaaaa", { observations: [obs1], coversUpToId: "raw-1" }),
-			reflectionsRecordedEntry("om-eeeeeeeeeeee", { reflections: [ref1], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-1", "observed source"),
+			observationsRecordedEntry("om-obs", { observations: [obs], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "unobserved source before the cut"),
+			textCustomMessage("raw-3", "retained tail"),
 		];
-		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
-
-		const result = await run("raw-1") as any;
-
-		expect(result.compaction.details.fullFold).toBe(false);
-		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa"]);
-		expect(result.compaction.details.reflections).toEqual([]);
-		expect(result.compaction.summary).toContain("## Observations");
-		expect(result.compaction.summary).not.toContain("## Reflections");
+		const { run, runtime, ctx } = setup({ entries });
+		const result = replacement(await run("raw-3"));
+		expect(result.firstKeptEntryId).toBe("raw-3");
+		expect(result.tokensBefore).toBe(123);
+		expect(result.details?.observations).toEqual([obs]);
+		expect(result.summary).toContain(obs.content);
+		expect(runtime.resolveModel).not.toHaveBeenCalled();
+		expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
 	});
 
-	it("writes a normal V3 projection without applying new reflections or drops", async () => {
-		const obs1 = observation("aaaaaaaaaaaa", { tokenCount: 5 });
-		const obs2 = observation("bbbbbbbbbbbb", { tokenCount: 5 });
-		const ref1 = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
-		const ref2 = reflection("ffffffffffff", ["bbbbbbbbbbbb"]);
-		const entries = [
+	it("first normal compaction writes observations without orphan reflections", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"], tokenCount: 10 });
+		const ref = reflection("eeeeeeeeeeee", [obs.id]);
+		const { run } = setup({ entries: [
 			textCustomMessage("raw-1", "aaaa"),
-			observationsRecordedEntry("om-aaaaaaaaaaaa", { observations: [obs1], coversUpToId: "raw-1" }),
-			reflectionsRecordedEntry("om-eeeeeeeeeeee", { reflections: [ref1], coversUpToId: "raw-1" }),
-			compactionEntry("cmp-full", { firstKeptEntryId: "raw-1", details: memoryDetails({ fullFold: true, observations: [obs1], reflections: [ref1] }) }),
-			textCustomMessage("raw-2", "bbbb"),
-			observationsRecordedEntry("om-bbbbbbbbbbbb", { observations: [obs2], coversUpToId: "raw-2" }),
-			reflectionsRecordedEntry("om-ffffffffffff", { reflections: [ref2], coversUpToId: "raw-2" }),
-			observationsDroppedEntry("om-drop-2", { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-2" }),
-		];
-		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
-
-		const result = await run("raw-2") as any;
-
-		expect(result.compaction.details).toMatchObject({ type: "om.folded", version: 1, fullFold: false });
-		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
-		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee"]);
-		expect(result.compaction.summary).toContain("## Reflections\n[eeeeeeeeeeee]");
-		expect(result.compaction.summary).toContain("## Observations");
+			observationsRecordedEntry("om-obs", { observations: [obs], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref", { reflections: [ref], coversUpToId: "raw-1" }),
+		], observationsPoolMaxTokens: 100 });
+		const result = replacement(await run("raw-1"));
+		expect(result.details).toMatchObject({ fullFold: false, observations: [obs], reflections: [] });
+		expect(result.summary).toContain(obs.content);
+		expect(result.summary).not.toContain(`[${ref.id}]`);
 	});
 
-	it("writes a full V3 projection when observation pool pressure reaches the threshold", async () => {
+	it.each([false, true])("applies new maintenance only on a full fold (fullFold=%s)", async (fullFold) => {
 		const obs1 = observation("aaaaaaaaaaaa", { tokenCount: 80 });
 		const obs2 = observation("bbbbbbbbbbbb", { tokenCount: 30 });
-		const ref1 = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
-		const ref2 = reflection("ffffffffffff", ["bbbbbbbbbbbb"]);
+		const ref1 = reflection("eeeeeeeeeeee", [obs1.id]);
+		const ref2 = reflection("ffffffffffff", [obs2.id]);
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
-			observationsRecordedEntry("om-aaaaaaaaaaaa", { observations: [obs1], coversUpToId: "raw-1" }),
-			reflectionsRecordedEntry("om-eeeeeeeeeeee", { reflections: [ref1], coversUpToId: "raw-1" }),
+			observationsRecordedEntry("om-obs-1", { observations: [obs1], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref-1", { reflections: [ref1], coversUpToId: "raw-1" }),
 			compactionEntry("cmp-full", { firstKeptEntryId: "raw-1", details: memoryDetails({ fullFold: true, observations: [obs1], reflections: [ref1] }) }),
 			textCustomMessage("raw-2", "bbbb"),
-			observationsRecordedEntry("om-bbbbbbbbbbbb", { observations: [obs2], coversUpToId: "raw-2" }),
-			reflectionsRecordedEntry("om-ffffffffffff", { reflections: [ref2], coversUpToId: "raw-2" }),
-			observationsDroppedEntry("om-drop-2", { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-2" }),
+			observationsRecordedEntry("om-obs-2", { observations: [obs2], coversUpToId: "raw-2" }),
+			reflectionsRecordedEntry("om-ref-2", { reflections: [ref2], coversUpToId: "raw-2" }),
+			observationsDroppedEntry("om-drop", { observationIds: [obs1.id], coversUpToId: "raw-2" }),
 		];
-		const { run } = setup({ entries, observationsPoolMaxTokens: 100 });
-
-		const result = await run("raw-2") as any;
-
-		expect(result.compaction.details.fullFold).toBe(true);
-		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
-		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
+		const { run } = setup({ entries, observationsPoolMaxTokens: fullFold ? 100 : 1000 });
+		const result = replacement(await run("raw-2"));
+		expect(result.details).toMatchObject({
+			fullFold,
+			observations: fullFold ? [obs2] : [obs1, obs2],
+			reflections: fullFold ? [ref1, ref2] : [ref1],
+		});
+		expect(result.summary).toContain(`[${ref1.id}]`);
+		if (fullFold) expect(result.summary).toContain(`[${ref2.id}]`);
+		else expect(result.summary).not.toContain(`[${ref2.id}]`);
 	});
 
-	it("renders a fixed no-memory summary when only old V2 memory exists", async () => {
-		const entries = [
+	it("declines ownership when only old V2 memory exists", async () => {
+		const { run } = setup({ entries: [
 			textCustomMessage("raw-1", "aaaa"),
 			oldV2ObservationEntry("v2-obs"),
 			compactionEntry("cmp-v2", { firstKeptEntryId: "raw-1", details: oldV2CompactionDetails() }),
-		];
-		const { run } = setup({ entries });
-
-		const result = await run("cmp-v2") as any;
-
-		expect(result.compaction.firstKeptEntryId).toBe("cmp-v2");
-		expect(result.compaction.summary).toContain("No observational memory was recorded");
+		] });
+		await expect(run("cmp-v2")).resolves.toBeUndefined();
 	});
 
-	it("does not wait for worker promises", async () => {
-		const entries = [textCustomMessage("raw-1", "aaaa")];
-		const { run, runtime } = setup({ entries });
-
-		const result = await Promise.race([
-			run("raw-1"),
-			new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), 50)),
-		]);
-
-		expect(result).toMatchObject({ compaction: { firstKeptEntryId: "raw-1" } });
-	});
-
-	it("cancels duplicate in-flight compaction and notifies the UI", async () => {
-		const entries = [textCustomMessage("raw-1", "aaaa")];
-		const { run, ctx } = setup({ entries, compactHookInFlight: true });
-
-		await expect(run("raw-1")).resolves.toEqual({ cancel: true });
-		expect(ctx.ui.notify).toHaveBeenCalledWith(
-			"Observational memory: another compaction is already in progress; cancelling duplicate",
-			"warning",
-		);
+	it("cancels a duplicate compaction", async () => {
+		const { run, ctx } = setup({ entries: [], compactHookInFlight: true });
+		await expect(run()).resolves.toEqual({ cancel: true });
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.any(String), "warning");
 	});
 });

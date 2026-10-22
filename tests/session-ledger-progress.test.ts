@@ -13,7 +13,6 @@ import {
 	rawTokensSinceReflectionCoverage,
 	observedTokensSinceLastCompaction,
 	resetBoundaryIndex,
-	unobservedSourceSpanBefore,
 	realTokensSinceAnchor,
 } from "../src/session-ledger/index.js";
 import {
@@ -178,8 +177,6 @@ describe("session-ledger V3 progress helpers", () => {
 
 			expect(rawTokensSinceObservationCoverage(entries)).toBe(2);
 			expect(rawTokensAfterIndex(entries, -1)).toBe(2);
-			expect(unobservedSourceSpanBefore(entries, 5)).toEqual({ firstIndex: 3, lastIndex: 4, entryCount: 2, tokens: 2 });
-			expect(unobservedSourceSpanBefore(entries, 3)).toBeUndefined();
 		});
 
 		it("coverage markers at or before the boundary do not count; the boundary is the coverage floor", () => {
