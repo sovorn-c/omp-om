@@ -238,7 +238,7 @@ showWorkerNotifications: true
 passive: false
 debugLog: false
 `;
-const PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
+const PASSIVE_ENV = "OMP_OM_PASSIVE";
 
 /** Keys earlier versions accepted that no longer do. They are ignored with a warning. */
 const REMOVED_KEYS = [

@@ -8564,7 +8564,7 @@ showWorkerNotifications: true
 passive: false
 debugLog: false
 `;
-var PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
+var PASSIVE_ENV = "OMP_OM_PASSIVE";
 var REMOVED_KEYS = [
   "compactAfterTokens",
   "compactAfterTokensMode",

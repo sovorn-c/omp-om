@@ -81,7 +81,7 @@ describe("omp-om config", () => {
 	it("applies the passive env override last", () => {
 		writeJson(globalPath, { passive: false });
 
-		expect(loadConfig(cwd, agentDir, { PI_OBSERVATIONAL_MEMORY_PASSIVE: "true" }).config.passive).toBe(true);
+		expect(loadConfig(cwd, agentDir, { OMP_OM_PASSIVE: "true" }).config.passive).toBe(true);
 	});
 
 	it("malformed JSON yields defaults plus one warning", () => {
@@ -206,9 +206,9 @@ describe("omp-om config", () => {
 	});
 
 	it("parses passive env override", () => {
-		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "on" })).toEqual({ passive: true });
-		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "0" })).toEqual({ passive: false });
-		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "maybe" })).toEqual({});
+		expect(readEnvConfig({ OMP_OM_PASSIVE: "on" })).toEqual({ passive: true });
+		expect(readEnvConfig({ OMP_OM_PASSIVE: "0" })).toEqual({ passive: false });
+		expect(readEnvConfig({ OMP_OM_PASSIVE: "maybe" })).toEqual({});
 	});
 
 	it("reads YAML syntax including comments, and an all-comment file is not a warning", () => {

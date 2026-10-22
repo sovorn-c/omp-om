@@ -62,13 +62,21 @@ Your `omp-om.yml` and existing session memory are untouched by updates.
 
 omp-om never edits omp's settings. omp's compaction stays on and omp's own threshold decides when it fires. Keep `observeAfterTokens` < `reflectAfterTokens` < omp's compaction threshold so the ledger is ahead of the cut.
 
+## Compaction methods
+
+Leave `compaction.methodOrder` (`remote`, `handoff`, `snapcompact`, `soft`, `shake`) as it is; nothing needs turning off.
+
+- **Memory healthy:** omp-om supplies the summary, so omp's summary methods are not used. Handoff and snapcompact generation are skipped, and omp's background (speculative) compaction is disabled while omp-om is loaded because omp does not speculate when an extension intercepts compaction. omp still decides the trigger and the cut.
+- **Memory model missing or failing:** omp-om warns once, stops observing and reflecting, and returns control to omp. omp then runs the first usable method in your `methodOrder`, exactly as it would without omp-om.
+- **Display only:** omp may label the compaction with the method it selected (for example `handoff`) even though omp-om wrote the summary. Check `/om:view` or the compaction entry's `fromExtension`.
+
 ## Configuration
 
 omp-om reads one YAML file, `omp-om.yml`:
 
 - **Global:** `~/.omp/agent/omp-om.yml` (`<agent dir>/omp-om.yml`). Created with all defaults and comments the first time omp-om starts, if it does not exist. Never overwritten.
 - **Project override:** `<project>/.omp/omp-om.yml`, merged over the global file. Not created automatically.
-- **Environment:** `PI_OBSERVATIONAL_MEMORY_PASSIVE` (`1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`) overrides only `passive`.
+- **Environment:** `OMP_OM_PASSIVE` (`1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`) overrides only `passive`.
 
 Every key is optional; delete a line to get its default. The generated file looks like this (keys with derived defaults are commented out):
 
