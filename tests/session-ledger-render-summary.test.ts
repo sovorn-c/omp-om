@@ -152,8 +152,8 @@ describe("renderFallbackSummary", () => {
 		const entries = [
 			rawMessage("u0", "first request"),
 			coverage("om-0", "u0", [obs]),
-			rawMessage("u1", "please refactor the parser module"),
-			rawMessage("u2", "y".repeat(1000)),
+			rawMessage("u1", "y".repeat(1000)),
+			rawMessage("u2", "please refactor the parser module"),
 			rawMessage("u3", "kept tail"),
 		];
 
@@ -165,6 +165,22 @@ describe("renderFallbackSummary", () => {
 		expect(summary).not.toContain("y".repeat(300));
 		expect(summary.indexOf("[aaaaaaaaaaaa]")).toBeLessThan(summary.indexOf("please refactor"));
 		expect(estimate(summary)).toBeLessThanOrEqual(800);
+	});
+
+	it("keeps the newest unobserved user message nearly whole while older ones stay short", () => {
+		const latest = `${"start of the current task. ".repeat(3)}${"detail ".repeat(200)}final sentence of the request`;
+		const entries = [
+			rawMessage("u0", "first request"),
+			coverage("om-0", "u0", [observation("aaaaaaaaaaaa", { content: "Observed fact." })]),
+			rawMessage("u1", "o".repeat(1000)),
+			rawMessage("u2", latest),
+			rawMessage("u3", "kept tail"),
+		];
+
+		const summary = renderFallbackSummary(entries, "u3", { maxTokens: 4000 });
+
+		expect(summary).toContain("final sentence of the request");
+		expect(summary).not.toContain("o".repeat(300));
 	});
 
 	it("is deterministic and stays within a small budget", () => {

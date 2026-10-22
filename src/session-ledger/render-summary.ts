@@ -119,6 +119,8 @@ export const NO_MEMORY_NOTICE =
 
 const FALLBACK_HEADER = "Observational memory (model-free fallback summary; no memory model was used).";
 const EXCERPT_MAX_CHARS = 200;
+/** The newest unobserved human message usually carries the current task, so it keeps far more text. */
+const LATEST_EXCERPT_MAX_CHARS = 6000;
 /** Share of the space left after the fixed text that unobserved excerpts may take. */
 const FALLBACK_EXCERPT_SHARE = 0.4;
 const OMITTED_EXCERPTS_NOTE_TOKENS = 12;
@@ -186,9 +188,9 @@ function entryExcerptSource(entry: Entry): string | undefined {
 	return undefined;
 }
 
-function excerptOf(text: string): string {
+function excerptOf(text: string, maxChars = EXCERPT_MAX_CHARS): string {
 	const flat = text.replace(/\s+/g, " ").trim();
-	return flat.length > EXCERPT_MAX_CHARS ? `${flat.slice(0, EXCERPT_MAX_CHARS).trimEnd()}…` : flat;
+	return flat.length > maxChars ? `${flat.slice(0, maxChars).trimEnd()}…` : flat;
 }
 
 function pickNewestExcerpts(lines: string[], budget: number): string[] {
@@ -234,9 +236,14 @@ export function renderFallbackSummary(entries: Entry[], foldThroughEntryId: stri
 		const notice = `${describeUnobservedSpan(gap)} before this point were never observed, so no memory record describes them and they are no longer in context.`;
 		budget -= blockTokens(notice);
 		const candidates: string[] = [];
+		let newestIndex = -1;
 		for (let i = gap.firstIndex; i <= gap.lastIndex; i++) {
 			if (!isSourceEntry(entries[i])) continue;
-			const text = excerptOf(entryExcerptSource(entries[i]) ?? "");
+			if (entryExcerptSource(entries[i])) newestIndex = i;
+		}
+		for (let i = gap.firstIndex; i <= gap.lastIndex; i++) {
+			if (!isSourceEntry(entries[i])) continue;
+			const text = excerptOf(entryExcerptSource(entries[i]) ?? "", i === newestIndex ? LATEST_EXCERPT_MAX_CHARS : EXCERPT_MAX_CHARS);
 			if (text) candidates.push(`- ${text}`);
 		}
 		const excerptBudget = Math.floor(Math.max(0, budget) * FALLBACK_EXCERPT_SHARE);

@@ -8124,6 +8124,7 @@ ${keptObservations.map(observationToSummaryLine).join("\n")}`);
 var NO_MEMORY_NOTICE = "No observational memory was recorded for this session before this compaction; the earlier context is not summarized.";
 var FALLBACK_HEADER = "Observational memory (model-free fallback summary; no memory model was used).";
 var EXCERPT_MAX_CHARS = 200;
+var LATEST_EXCERPT_MAX_CHARS = 6e3;
 var FALLBACK_EXCERPT_SHARE = 0.4;
 var OMITTED_EXCERPTS_NOTE_TOKENS = 12;
 var MIN_TRUNCATED_RECORD_TOKENS = 16;
@@ -8174,9 +8175,9 @@ function entryExcerptSource(entry) {
   if (entry.type === "branch_summary") return typeof entry.summary === "string" ? entry.summary : void 0;
   return void 0;
 }
-function excerptOf(text) {
+function excerptOf(text, maxChars = EXCERPT_MAX_CHARS) {
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > EXCERPT_MAX_CHARS ? `${flat.slice(0, EXCERPT_MAX_CHARS).trimEnd()}\u2026` : flat;
+  return flat.length > maxChars ? `${flat.slice(0, maxChars).trimEnd()}\u2026` : flat;
 }
 function pickNewestExcerpts(lines, budget) {
   const picked = [];
@@ -8203,9 +8204,14 @@ function renderFallbackSummary(entries, foldThroughEntryId, opts) {
     const notice = `${describeUnobservedSpan(gap)} before this point were never observed, so no memory record describes them and they are no longer in context.`;
     budget -= blockTokens(notice);
     const candidates = [];
+    let newestIndex = -1;
     for (let i = gap.firstIndex; i <= gap.lastIndex; i++) {
       if (!isSourceEntry(entries[i])) continue;
-      const text = excerptOf(entryExcerptSource(entries[i]) ?? "");
+      if (entryExcerptSource(entries[i])) newestIndex = i;
+    }
+    for (let i = gap.firstIndex; i <= gap.lastIndex; i++) {
+      if (!isSourceEntry(entries[i])) continue;
+      const text = excerptOf(entryExcerptSource(entries[i]) ?? "", i === newestIndex ? LATEST_EXCERPT_MAX_CHARS : EXCERPT_MAX_CHARS);
       if (text) candidates.push(`- ${text}`);
     }
     const excerptBudget = Math.floor(Math.max(0, budget) * FALLBACK_EXCERPT_SHARE);
