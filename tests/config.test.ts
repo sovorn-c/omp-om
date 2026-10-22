@@ -49,6 +49,7 @@ describe("omp-om config", () => {
 			agentMaxTokens: 32000,
 			compactionCatchUpMaxChunks: 2,
 			compactionMaxRetainedTokens: 30000,
+			compactionSummaryMaxTokens: 25000,
 			model: "@smol",
 			showWorkerNotifications: true,
 			passive: false,

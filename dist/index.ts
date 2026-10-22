@@ -8475,6 +8475,7 @@ var DEFAULTS = {
   agentMaxTokens: 32e3,
   compactionCatchUpMaxChunks: 2,
   compactionMaxRetainedTokens: 3e4,
+  compactionSummaryMaxTokens: 25e3,
   model: "@smol",
   showWorkerNotifications: true,
   passive: false,
@@ -8558,10 +8559,13 @@ compactionCatchUpMaxChunks: 2
 # well under omp's compaction threshold so a compaction cannot re-trigger itself.
 compactionMaxRetainedTokens: 30000
 
+# Largest memory summary a compaction renders. Fixed rather than scaled to the
+# window so it stays under omp's threshold on 1M-window models too.
+compactionSummaryMaxTokens: 25000
+
 # Derived from the model's context window when unset:
 # observerChunkMaxTokens: 60000
 # workerMemoryMaxTokens: 16000
-# compactionSummaryMaxTokens: 8000
 
 showWorkerNotifications: true
 # Turn off the automatic workers; commands and the compaction hook stay active.
