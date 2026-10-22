@@ -206,7 +206,7 @@ describe("V3 /om:status", () => {
 	it("lists config warnings and omits the section when there are none", async () => {
 		const withWarnings = await setup({
 			entries: [],
-			runtime: { configWarnings: ['omp-om.json: "fallbackModel" is no longer supported and was ignored'] },
+			runtime: { configWarnings: ['omp-om.yml: "fallbackModel" is no longer supported and was ignored'] },
 		}).run();
 		const without = await setup({ entries: [] }).run();
 

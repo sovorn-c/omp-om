@@ -1,9 +1,9 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DEFAULTS, loadConfig, readEnvConfig } from "../src/config.js";
+import { DEFAULT_CONFIG_YAML, DEFAULTS, ensureGlobalConfig, loadConfig, readEnvConfig } from "../src/config.js";
 
 function writeJson(path: string, value: unknown) {
 	mkdirSync(join(path, ".."), { recursive: true });
@@ -21,8 +21,8 @@ describe("omp-om config", () => {
 		root = `${tmpdir()}/om-config-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 		cwd = join(root, "project");
 		agentDir = join(root, "agent");
-		globalPath = join(agentDir, "omp-om.json");
-		projectPath = join(cwd, ".omp", "omp-om.json");
+		globalPath = join(agentDir, "omp-om.yml");
+		projectPath = join(cwd, ".omp", "omp-om.yml");
 		mkdirSync(cwd, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
 	});
@@ -81,7 +81,7 @@ describe("omp-om config", () => {
 	it("applies the passive env override last", () => {
 		writeJson(globalPath, { passive: false });
 
-		expect(loadConfig(cwd, agentDir, { PI_OBSERVATIONAL_MEMORY_PASSIVE: "true" }).config.passive).toBe(true);
+		expect(loadConfig(cwd, agentDir, { OMP_OM_PASSIVE: "true" }).config.passive).toBe(true);
 	});
 
 	it("malformed JSON yields defaults plus one warning", () => {
@@ -206,8 +206,61 @@ describe("omp-om config", () => {
 	});
 
 	it("parses passive env override", () => {
-		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "on" })).toEqual({ passive: true });
-		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "0" })).toEqual({ passive: false });
-		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "maybe" })).toEqual({});
+		expect(readEnvConfig({ OMP_OM_PASSIVE: "on" })).toEqual({ passive: true });
+		expect(readEnvConfig({ OMP_OM_PASSIVE: "0" })).toEqual({ passive: false });
+		expect(readEnvConfig({ OMP_OM_PASSIVE: "maybe" })).toEqual({});
+	});
+
+	it("reads YAML syntax including comments, and an all-comment file is not a warning", () => {
+		writeFileSync(globalPath, "# note\nmodel: '@slow'\nobserveAfterTokens: 50 # inline\n", "utf-8");
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+		expect(config).toMatchObject({ model: "@slow", observeAfterTokens: 50 });
+		expect(warnings).toEqual([]);
+
+		writeFileSync(globalPath, "# everything commented out\n", "utf-8");
+		expect(loadConfig(cwd, agentDir, {})).toEqual({ config: DEFAULTS, warnings: [] });
+	});
+
+	it("the seeded default file loads to exactly the built-in defaults", () => {
+		expect(ensureGlobalConfig(agentDir)).toEqual([]);
+
+		expect(readFileSync(globalPath, "utf-8")).toBe(DEFAULT_CONFIG_YAML);
+		expect(loadConfig(cwd, agentDir, {})).toEqual({ config: DEFAULTS, warnings: [] });
+	});
+
+	it("creates a missing agent dir when seeding", () => {
+		rmSync(agentDir, { recursive: true, force: true });
+
+		expect(ensureGlobalConfig(agentDir)).toEqual([]);
+		expect(existsSync(globalPath)).toBe(true);
+	});
+
+	it("never overwrites an existing settings file", () => {
+		writeFileSync(globalPath, "model: '@slow'\n", "utf-8");
+
+		ensureGlobalConfig(agentDir);
+
+		expect(readFileSync(globalPath, "utf-8")).toBe("model: '@slow'\n");
+	});
+
+	it("does not seed over a legacy omp-om.json, and warns that it is no longer read", () => {
+		const legacy = join(agentDir, "omp-om.json");
+		writeFileSync(legacy, '{"model":"@slow"}', "utf-8");
+
+		expect(ensureGlobalConfig(agentDir)).toEqual([]);
+		expect(existsSync(globalPath)).toBe(false);
+		const { config, warnings } = loadConfig(cwd, agentDir, {});
+		expect(config.model).toBe("@smol");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain(legacy);
+	});
+
+	it("reports a warning instead of throwing when the file cannot be created", () => {
+		writeFileSync(join(root, "blocker"), "", "utf-8");
+
+		const warnings = ensureGlobalConfig(join(root, "blocker", "agent"));
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("could not create");
 	});
 });

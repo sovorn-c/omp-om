@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 export interface Config {
 	observeAfterTokens: number;
@@ -193,8 +194,51 @@ export function resolveObserverChunkMaxTokens(config: Config, contextWindow: num
 	return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
 }
 
-const CONFIG_FILE = "omp-om.json";
-const PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
+const CONFIG_FILE = "omp-om.yml";
+const LEGACY_CONFIG_FILE = "omp-om.json";
+
+/**
+ * Written to `<agentDir>/omp-om.yml` on first run so every option is visible
+ * and editable. It restates {@link DEFAULTS}; a test keeps the two in step.
+ * Keys whose default is derived at runtime stay commented out.
+ */
+export const DEFAULT_CONFIG_YAML = `# omp-om settings. Every key is optional; delete a line to get its default.
+# A project file at <project>/.omp/omp-om.yml is merged over this one.
+
+# Memory model for observer, reflector and dropper: provider/id, a bare id,
+# or a role alias such as @smol.
+model: "@smol"
+
+# Run the observer when this many tokens of conversation are unobserved.
+observeAfterTokens: 10000
+# Run the reflector when this many tokens of observations are unreflected.
+reflectAfterTokens: 20000
+# Keep observeAfterTokens < reflectAfterTokens < omp's compaction threshold.
+
+# Active observation budget; reaching it makes compaction a full fold.
+observationsPoolMaxTokens: 20000
+# Size the dropper trims toward (default: half of observationsPoolMaxTokens).
+# observationsPoolTargetTokens: 10000
+
+# Turn cap and output token request for each worker loop.
+agentMaxTurns: 16
+agentMaxTokens: 32000
+
+# Observer chunks allowed synchronously before a compaction; 0 disables.
+compactionCatchUpMaxChunks: 2
+
+# Derived from the model's context window when unset:
+# observerChunkMaxTokens: 60000
+# workerMemoryMaxTokens: 16000
+# compactionSummaryMaxTokens: 8000
+# compactionMaxRetainedTokens: 60000
+
+showWorkerNotifications: true
+# Turn off the automatic workers; commands and the compaction hook stay active.
+passive: false
+debugLog: false
+`;
+const PASSIVE_ENV = "OMP_OM_PASSIVE";
 
 /** Keys earlier versions accepted that no longer do. They are ignored with a warning. */
 const REMOVED_KEYS = [
@@ -274,20 +318,46 @@ function readConfigFile(path: string, warnings: string[]): Partial<Config> {
 	if (!existsSync(path)) return {};
 	let raw: unknown;
 	try {
-		raw = JSON.parse(readFileSync(path, "utf-8"));
+		raw = parseYaml(readFileSync(path, "utf-8"));
 	} catch (error) {
 		warnings.push(`${path}: ${error instanceof Error ? error.message : String(error)}; using defaults for this file`);
 		return {};
 	}
+	if (raw === null || raw === undefined) return {};
 	if (!isRecord(raw) || Array.isArray(raw)) {
-		warnings.push(`${path}: expected a JSON object; using defaults for this file`);
+		warnings.push(`${path}: expected a YAML mapping of keys to values; using defaults for this file`);
 		return {};
 	}
 	return normalizeSettingsConfig(path, raw, warnings);
 }
 
+function warnLegacyConfig(dir: string, warnings: string[]): void {
+	const legacy = join(dir, LEGACY_CONFIG_FILE);
+	if (existsSync(legacy)) {
+		warnings.push(`${legacy}: omp-om now reads ${CONFIG_FILE}; move these settings there and delete this file`);
+	}
+}
+
 /**
- * Load `<agentDir>/omp-om.json`, then merge `<cwd>/.omp/omp-om.json` and the
+ * Create `<agentDir>/omp-om.yml` with the documented defaults when the user has
+ * no settings file yet. Never overwrites, and stays out of the way of a
+ * leftover `omp-om.json` (which `loadConfig` warns about). Returns warnings.
+ */
+export function ensureGlobalConfig(agentDir: string): string[] {
+	const path = join(agentDir, CONFIG_FILE);
+	if (existsSync(path) || existsSync(join(agentDir, LEGACY_CONFIG_FILE))) return [];
+	try {
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(path, DEFAULT_CONFIG_YAML, { encoding: "utf-8", flag: "wx" });
+		return [];
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") return [];
+		return [`${path}: could not create default settings file: ${error instanceof Error ? error.message : String(error)}`];
+	}
+}
+
+/**
+ * Load `<agentDir>/omp-om.yml`, then merge `<cwd>/.omp/omp-om.yml` and the
  * passive env override over it. Problems never throw: a bad file contributes
  * nothing and adds one warning for the caller to surface.
  */
@@ -297,6 +367,8 @@ export function loadConfig(
 	env: NodeJS.ProcessEnv = process.env,
 ): { config: Config; warnings: string[] } {
 	const warnings: string[] = [];
+	warnLegacyConfig(agentDir, warnings);
+	warnLegacyConfig(join(cwd, ".omp"), warnings);
 	const globalConfig = readConfigFile(join(agentDir, CONFIG_FILE), warnings);
 	const projectConfig = readConfigFile(join(cwd, ".omp", CONFIG_FILE), warnings);
 	const envConfig = readEnvConfig(env);
