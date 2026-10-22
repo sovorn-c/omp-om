@@ -119,7 +119,7 @@ Earlier builds read `omp-om.json`. That file is no longer read: if one exists, o
 | `observerChunkMaxTokens` | derived | Cap on one observer chunk (minimum `256`). Unset: a fifth of the memory model's context window, or `60000` if unknown. |
 | `workerMemoryMaxTokens` | derived | Budget for prior memory carried by each worker request. Unset: a quarter of the memory model's window, or `16000`. |
 | `compactionSummaryMaxTokens` | derived | Budget for the rendered summary. Unset: an eighth of the session model's window, or `8000`. |
-| `compactionMaxRetainedTokens` | derived | How much unobserved conversation may stay in context past omp's cut. Unset: one eighth of the session model's window, or `25000`. |
+| `compactionMaxRetainedTokens` | derived | How much unobserved conversation may stay in context past omp's cut. Default `30000`; if unset, one eighth of the session model's window. |
 | `showWorkerNotifications` | `true` | Show routine worker progress notices when the session has a UI. Failure warnings are always shown. |
 | `passive` | `false` | Turn off the automatic workers. The commands, `om_recall` and the compaction hook stay active. |
 | `debugLog` | `false` | Write debug events as NDJSON under `<agent dir>/observational-memory/debug/<session id>.ndjson`. |

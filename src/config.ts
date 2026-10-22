@@ -69,6 +69,7 @@ export const DEFAULTS: Config = {
 	agentMaxTurns: 16,
 	agentMaxTokens: 32_000,
 	compactionCatchUpMaxChunks: 2,
+	compactionMaxRetainedTokens: 30000,
 	model: "@smol",
 	showWorkerNotifications: true,
 	passive: false,
@@ -227,11 +228,14 @@ agentMaxTokens: 32000
 # Observer chunks allowed synchronously before a compaction; 0 disables.
 compactionCatchUpMaxChunks: 2
 
+# Most unobserved conversation a compaction may keep past omp's cut. Keep it
+# well under omp's compaction threshold so a compaction cannot re-trigger itself.
+compactionMaxRetainedTokens: 30000
+
 # Derived from the model's context window when unset:
 # observerChunkMaxTokens: 60000
 # workerMemoryMaxTokens: 16000
 # compactionSummaryMaxTokens: 8000
-# compactionMaxRetainedTokens: 25000
 
 showWorkerNotifications: true
 # Turn off the automatic workers; commands and the compaction hook stay active.
