@@ -12,7 +12,7 @@ vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: workers.drop }));
 
 import { Runtime } from "../src/runtime.js";
 import { runMaintenanceLane, runObserverLane } from "../src/hooks/consolidation-trigger.js";
-import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import { HOOK_CATCH_UP_DEADLINE_MS, registerCompactionHook } from "../src/hooks/compaction-hook.js";
 import { observation, observationsRecordedEntry, rawMessage, type TestEntry } from "./fixtures/session.js";
 
 function setup(entries: TestEntry[] = [rawMessage("raw-1", "Remember the deployment decision: use region eu-west-1.")]) {
@@ -75,7 +75,7 @@ describe("memory failure leaves native omp running", () => {
 		const auth = Promise.withResolvers<{ ok: boolean; apiKey: string }>();
 		app.ctx.modelRegistry.getApiKeyAndHeaders.mockReturnValue(auth.promise);
 		const pending = app.compact();
-		await vi.advanceTimersByTimeAsync(20000);
+		await vi.advanceTimersByTimeAsync(HOOK_CATCH_UP_DEADLINE_MS);
 		await expect(pending).resolves.toBeUndefined();
 		auth.resolve({ ok: true, apiKey: "test" });
 		await vi.advanceTimersByTimeAsync(0);

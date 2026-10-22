@@ -9356,7 +9356,7 @@ async function catchUpObserver(args) {
 }
 
 // src/hooks/compaction-hook.ts
-var HOOK_CATCH_UP_DEADLINE_MS = 2e4;
+var HOOK_CATCH_UP_DEADLINE_MS = 25e3;
 var HOOK_IN_FLIGHT_WAIT_MS = 15e3;
 var HOOK_CATCH_UP_MIN_MS = 8e3;
 var HOOK_RENDER_MARGIN_MS = 2e3;
