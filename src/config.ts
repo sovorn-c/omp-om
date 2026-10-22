@@ -79,16 +79,16 @@ export const DEFAULTS: Config = {
 export const WORKER_THINKING_LEVEL = "low";
 
 /** Retained-tail budget used when `compactionMaxRetainedTokens` is unset and the context window is unknown. */
-export const COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 60_000;
+export const COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 25_000;
 
 /**
  * Fraction of the session model's context window the compaction hook may keep
- * when it retains unobserved source entries past Pi's proposed cut. Half the
- * window leaves room for the rendered memory summary, system prompt, tool
- * schemas, and the next response even when the ~4 chars/token estimate
- * undercounts real tokens.
+ * when it retains unobserved source entries past omp's proposed cut. One
+ * eighth of the window keeps retained tail plus the default summary budget
+ * (also one eighth) well below omp's post-compaction recovery band
+ * (0.8 x compaction threshold), so a moved cut cannot re-trigger compaction.
  */
-export const COMPACTION_RETAINED_CONTEXT_RATIO = 0.5;
+export const COMPACTION_RETAINED_CONTEXT_RATIO = 0.125;
 
 /**
  * Resolve how many estimated source tokens the compaction hook may retain when
@@ -231,7 +231,7 @@ compactionCatchUpMaxChunks: 2
 # observerChunkMaxTokens: 60000
 # workerMemoryMaxTokens: 16000
 # compactionSummaryMaxTokens: 8000
-# compactionMaxRetainedTokens: 60000
+# compactionMaxRetainedTokens: 25000
 
 showWorkerNotifications: true
 # Turn off the automatic workers; commands and the compaction hook stay active.

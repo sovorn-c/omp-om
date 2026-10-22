@@ -8480,8 +8480,8 @@ var DEFAULTS = {
   debugLog: false
 };
 var WORKER_THINKING_LEVEL = "low";
-var COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 6e4;
-var COMPACTION_RETAINED_CONTEXT_RATIO = 0.5;
+var COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 25e3;
+var COMPACTION_RETAINED_CONTEXT_RATIO = 0.125;
 function resolveCompactionMaxRetainedTokens(config, contextWindow) {
   if (config.compactionMaxRetainedTokens !== void 0 && config.compactionMaxRetainedTokens > 0) {
     return config.compactionMaxRetainedTokens;
@@ -8557,7 +8557,7 @@ compactionCatchUpMaxChunks: 2
 # observerChunkMaxTokens: 60000
 # workerMemoryMaxTokens: 16000
 # compactionSummaryMaxTokens: 8000
-# compactionMaxRetainedTokens: 60000
+# compactionMaxRetainedTokens: 25000
 
 showWorkerNotifications: true
 # Turn off the automatic workers; commands and the compaction hook stay active.
