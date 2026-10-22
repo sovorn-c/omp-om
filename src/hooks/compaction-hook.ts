@@ -28,8 +28,8 @@ import {
 	type UnobservedSourceSpan,
 } from "../session-ledger/index.js";
 
-/** Bound hook work below omp's 30s handler timeout (per its docs) so native fallback can run; 5s of headroom. */
-export const HOOK_CATCH_UP_DEADLINE_MS = 25_000;
+/** Bound hook work below omp's 30s handler timeout (per its docs) so native fallback can run; 3s of headroom. */
+export const HOOK_CATCH_UP_DEADLINE_MS = 27_000;
 
 /** Longest the hook waits for a background consolidation; observer runs on slow models take 10s+. */
 export const HOOK_IN_FLIGHT_WAIT_MS = 15_000;

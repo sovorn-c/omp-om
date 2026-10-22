@@ -19,9 +19,9 @@ describe("resolveObserverChunkMaxTokens", () => {
 		expect(resolveObserverChunkMaxTokens(config({ observerChunkMaxTokens: 12_345 }), undefined)).toBe(12_345);
 	});
 
-	it("derives the cap from the model context window when unset", () => {
-		expect(resolveObserverChunkMaxTokens(config(), 1_000_000)).toBe(Math.floor(1_000_000 * OBSERVER_CHUNK_CONTEXT_RATIO));
-		expect(resolveObserverChunkMaxTokens(config(), 200_000)).toBe(Math.floor(200_000 * OBSERVER_CHUNK_CONTEXT_RATIO));
+	it("derives the cap from the model context window, bounded by the latency cap", () => {
+		expect(resolveObserverChunkMaxTokens(config(), 1_000_000)).toBe(OBSERVER_CHUNK_FALLBACK_MAX_TOKENS);
+		expect(resolveObserverChunkMaxTokens(config(), 20_000)).toBe(Math.floor(20_000 * OBSERVER_CHUNK_CONTEXT_RATIO));
 		expect(resolveObserverChunkMaxTokens(config(), 3)).toBe(OBSERVER_CHUNK_MIN_TOKENS);
 	});
 
@@ -37,6 +37,6 @@ describe("resolveObserverChunkMaxTokens", () => {
 	});
 
 	it("ignores non-positive config values", () => {
-		expect(resolveObserverChunkMaxTokens(config({ observerChunkMaxTokens: 0 }), 100_000)).toBe(Math.floor(100_000 * OBSERVER_CHUNK_CONTEXT_RATIO));
+		expect(resolveObserverChunkMaxTokens(config({ observerChunkMaxTokens: 0 }), 20_000)).toBe(Math.floor(20_000 * OBSERVER_CHUNK_CONTEXT_RATIO));
 	});
 });

@@ -154,8 +154,13 @@ export function resolveWorkerMemoryMaxTokens(config: Config, contextWindow: numb
 	return WORKER_MEMORY_FALLBACK_MAX_TOKENS;
 }
 
-/** Observer chunk cap used when no config is set and the model's context window is unknown. */
-export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 60_000;
+/**
+ * Latency cap on the default observer chunk, and the cap when the context window is unknown.
+ * A ~20k-token chunk took ~21s on the memory model in live runs, longer than a compaction can
+ * wait inside omp's 30s handler budget. Around 8k keeps a chunk to seconds, so a compaction that
+ * lands mid-chunk waits briefly and catch-up can record a chunk before the deadline.
+ */
+export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 8_000;
 
 /** Smallest useful observer chunk: enough for labels, omission markers, and source context. */
 export const OBSERVER_CHUNK_MIN_TOKENS = 256;
@@ -174,8 +179,8 @@ export const OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
  *
  * An explicit `observerChunkMaxTokens` config value always wins. Otherwise the
  * cap is `floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO)` for the resolved
- * memory model, falling back to {@link OBSERVER_CHUNK_FALLBACK_MAX_TOKENS} when
- * the context window is unavailable.
+ * memory model, bounded by {@link OBSERVER_CHUNK_FALLBACK_MAX_TOKENS}, which is also
+ * the cap when the context window is unavailable.
  *
  * Without a cap, a backlog that outgrows the model's context window (e.g.
  * after repeated observer failures, or when the extension is enabled mid-way
@@ -190,7 +195,7 @@ export function resolveObserverChunkMaxTokens(config: Config, contextWindow: num
 	if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
 		return Math.max(
 			OBSERVER_CHUNK_MIN_TOKENS,
-			Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO),
+			Math.min(OBSERVER_CHUNK_FALLBACK_MAX_TOKENS, Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO)),
 		);
 	}
 	return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;

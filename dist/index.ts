@@ -8520,7 +8520,7 @@ function resolveWorkerMemoryMaxTokens(config, contextWindow) {
   }
   return WORKER_MEMORY_FALLBACK_MAX_TOKENS;
 }
-var OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 6e4;
+var OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 8e3;
 var OBSERVER_CHUNK_MIN_TOKENS = 256;
 var OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
 function resolveObserverChunkMaxTokens(config, contextWindow) {
@@ -8530,7 +8530,7 @@ function resolveObserverChunkMaxTokens(config, contextWindow) {
   if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
     return Math.max(
       OBSERVER_CHUNK_MIN_TOKENS,
-      Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO)
+      Math.min(OBSERVER_CHUNK_FALLBACK_MAX_TOKENS, Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO))
     );
   }
   return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
@@ -9356,7 +9356,7 @@ async function catchUpObserver(args) {
 }
 
 // src/hooks/compaction-hook.ts
-var HOOK_CATCH_UP_DEADLINE_MS = 25e3;
+var HOOK_CATCH_UP_DEADLINE_MS = 27e3;
 var HOOK_IN_FLIGHT_WAIT_MS = 15e3;
 var HOOK_CATCH_UP_MIN_MS = 8e3;
 var HOOK_RENDER_MARGIN_MS = 2e3;
