@@ -278,6 +278,8 @@ export async function runObserverLane(
 			if ((await runObserverStage(pi, runtime, ctx, resolver)) === "abort") return;
 			const after = latestCoverageIndex(ctx.sessionManager.getBranch() as Entry[], OM_OBSERVATIONS_RECORDED);
 			if (after <= before) return;
+			// A compaction is waiting on this lane: stop at the chunk boundary so it can re-resolve its cut now.
+			if (runtime.compactHookInFlight) return;
 		}
 	} catch (error) {
 		debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });

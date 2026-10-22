@@ -10407,6 +10407,7 @@ async function runObserverLane(pi, runtime, ctx) {
       if (await runObserverStage(pi, runtime, ctx, resolver) === "abort") return;
       const after = latestCoverageIndex(ctx.sessionManager.getBranch(), OM_OBSERVATIONS_RECORDED);
       if (after <= before) return;
+      if (runtime.compactHookInFlight) return;
     }
   } catch (error) {
     debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });

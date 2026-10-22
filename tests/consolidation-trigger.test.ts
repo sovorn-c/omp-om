@@ -881,6 +881,22 @@ describe("observer chunk cap", () => {
 		expect(runtime.launchObserverTask).toHaveBeenCalledTimes(1);
 	});
 
+	it("stops draining at a chunk boundary while a compaction waits on the observer", async () => {
+		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce([first]);
+		const entries = [
+			textCustomMessage("raw-1", "a".repeat(800)),
+			textCustomMessage("raw-2", "b".repeat(800)),
+		];
+		const { fire, runLaunchedWork, runtime } = setup({ entries, observerChunkMaxTokens: 256, reflectAfterTokens: 999 });
+		(runtime as any).compactHookInFlight = true;
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+	});
+
 	it("stops draining when a chunk records nothing", async () => {
 		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
 		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce(undefined);
