@@ -857,10 +857,11 @@ describe("V3 consolidation trigger", () => {
 });
 
 describe("observer chunk cap", () => {
-	it("caps an oversized backlog and drains it incrementally across runs", async () => {
+	it("caps each chunk but drains an oversized backlog within one launch", async () => {
 		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
 		const second = observation("222222222222", { sourceEntryIds: ["raw-2"], tokenCount: 4 });
-		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce([second]);
+		const third = observation("333333333333", { sourceEntryIds: ["raw-3"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce([second]).mockResolvedValueOnce([third]);
 		const entries = [
 			textCustomMessage("raw-1", "a".repeat(800)),
 			textCustomMessage("raw-2", "b".repeat(800)),
@@ -871,16 +872,29 @@ describe("observer chunk cap", () => {
 		fire();
 		await runLaunchedWork();
 
-		// Only the oldest entry fits under the cap; coverage advances to it, not to the backlog tail.
+		// Each chunk holds one entry; coverage advances chunk by chunk without another turn event.
 		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(1, expect.objectContaining({ allowedSourceEntryIds: ["raw-1"] }));
+		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(2, expect.objectContaining({ allowedSourceEntryIds: ["raw-2"] }));
+		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(3, expect.objectContaining({ allowedSourceEntryIds: ["raw-3"] }));
 		expect(pi.appendEntry).toHaveBeenNthCalledWith(1, OM_OBSERVATIONS_RECORDED, { observations: [first], coversUpToId: "raw-1" });
+		expect(pi.appendEntry).toHaveBeenNthCalledWith(3, OM_OBSERVATIONS_RECORDED, { observations: [third], coversUpToId: "raw-3" });
+		expect(runtime.launchObserverTask).toHaveBeenCalledTimes(1);
+	});
 
-		// The next run continues from the advanced coverage.
+	it("stops draining when a chunk records nothing", async () => {
+		const first = observation("111111111111", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce(undefined);
+		const entries = [
+			textCustomMessage("raw-1", "a".repeat(800)),
+			textCustomMessage("raw-2", "b".repeat(800)),
+			textCustomMessage("raw-3", "c".repeat(800)),
+		];
+		const { fire, runLaunchedWork } = setup({ entries, observerChunkMaxTokens: 256, reflectAfterTokens: 999 });
+
 		fire();
 		await runLaunchedWork();
 
-		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(2, expect.objectContaining({ allowedSourceEntryIds: ["raw-2"] }));
-		expect(pi.appendEntry).toHaveBeenNthCalledWith(2, OM_OBSERVATIONS_RECORDED, { observations: [second], coversUpToId: "raw-2" });
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
 	});
 
 	it("bounds one oversized tool result, preserves provenance, and continues on the next run", async () => {

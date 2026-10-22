@@ -10402,7 +10402,12 @@ function maybeLaunchConsolidation(pi, runtime, ctx) {
 async function runObserverLane(pi, runtime, ctx) {
   const resolver = makeModelResolver(runtime, ctx);
   try {
-    await runObserverStage(pi, runtime, ctx, resolver);
+    for (; ; ) {
+      const before = latestCoverageIndex(ctx.sessionManager.getBranch(), OM_OBSERVATIONS_RECORDED);
+      if (await runObserverStage(pi, runtime, ctx, resolver) === "abort") return;
+      const after = latestCoverageIndex(ctx.sessionManager.getBranch(), OM_OBSERVATIONS_RECORDED);
+      if (after <= before) return;
+    }
   } catch (error) {
     debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
   }

@@ -261,7 +261,11 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 	maybeLaunchMaintenance(pi, runtime, consolidationCtx, debugContext);
 }
 
-/** Observer lane: the observer stage only. Never waits on, or is waited on by, the maintenance lane. */
+/**
+ * Observer lane: the observer stage only. Never waits on, or is waited on by, the maintenance lane.
+ * Drains the backlog chunk by chunk: a backlog bigger than one chunk cap would otherwise wait for the
+ * next turn event per chunk and fall behind a fast-growing session. Each pass must advance coverage.
+ */
 export async function runObserverLane(
 	pi: ExtensionAPI,
 	runtime: Runtime,
@@ -269,7 +273,12 @@ export async function runObserverLane(
 ): Promise<void> {
 	const resolver = makeModelResolver(runtime, ctx);
 	try {
-		await runObserverStage(pi, runtime, ctx, resolver);
+		for (;;) {
+			const before = latestCoverageIndex(ctx.sessionManager.getBranch() as Entry[], OM_OBSERVATIONS_RECORDED);
+			if ((await runObserverStage(pi, runtime, ctx, resolver)) === "abort") return;
+			const after = latestCoverageIndex(ctx.sessionManager.getBranch() as Entry[], OM_OBSERVATIONS_RECORDED);
+			if (after <= before) return;
+		}
 	} catch (error) {
 		debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
 	}
