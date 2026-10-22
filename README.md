@@ -141,7 +141,7 @@ Subagent sessions never run the background workers; only the main session's ledg
 When omp compacts, omp-om decides in this order:
 
 1. **Memory model unhealthy** (can't resolve, can't authenticate, request failed, 20 second deadline hit): warn and let omp's normal summarizer run.
-2. **Ledger behind omp's cut:** if a background observer run is already in progress, wait for it (up to 8 seconds), then the observer catches up the rest, up to `compactionCatchUpMaxChunks` chunks. If the remaining tail fits, the cut moves back to keep it in context.
+2. **Ledger behind omp's cut:** if a background run is still in its observer stage, wait for that stage to finish (up to 15 seconds; its reflector and dropper are not waited for), then the observer catches up the rest, up to `compactionCatchUpMaxChunks` chunks. Catch-up starts only with at least 8 seconds of the deadline left and stops 2 seconds before it; a slow catch-up is not an outage, so omp-om keeps what it recorded and compacts with its own summary. If the remaining tail fits, the cut moves back to keep it in context.
 3. **Tail or summary doesn't fit the budget:** omp-om writes a deterministic summary from the ledger that fits plus excerpts of the unobserved input.
 4. **Cancellation:** a user abort cancels compaction. A second compaction while one is running is cancelled as a duplicate.
 
@@ -155,7 +155,7 @@ Warnings appear only in sessions with a UI. Turn on `debugLog` to see the underl
 | --- | --- |
 | `observer failed: memory model "…" did not resolve …` | Fix `model` or its credentials. omp uses normal compaction until a worker request succeeds. |
 | `memory model unavailable: …` | Resolution or authentication failed before compaction. omp's normal compaction runs. |
-| `memory work reached the 20s hook deadline` | Authentication or catch-up took too long. omp's normal compaction runs; late worker results are ignored. |
+| `memory work reached the 20s hook deadline` | Authentication or in-flight wait took too long. omp's normal compaction runs; late worker results are ignored. A slow catch-up stops before the deadline and does not trigger this. |
 | `observer catch-up failed: …` | The catch-up request failed; the provider's reason is included. omp's normal compaction runs. |
 | `observer has not reached …; keeping them in context until they are observed` | Info only: the cut moved back to retain unobserved conversation. |
 | `no memory record fits the ~N-token summary budget; using a truncated model-free summary` | Raise `compactionSummaryMaxTokens`. |
