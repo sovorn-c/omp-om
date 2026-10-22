@@ -8474,14 +8474,15 @@ var DEFAULTS = {
   agentMaxTurns: 16,
   agentMaxTokens: 32e3,
   compactionCatchUpMaxChunks: 2,
+  compactionMaxRetainedTokens: 3e4,
   model: "@smol",
   showWorkerNotifications: true,
   passive: false,
   debugLog: false
 };
 var WORKER_THINKING_LEVEL = "low";
-var COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 6e4;
-var COMPACTION_RETAINED_CONTEXT_RATIO = 0.5;
+var COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 25e3;
+var COMPACTION_RETAINED_CONTEXT_RATIO = 0.125;
 function resolveCompactionMaxRetainedTokens(config, contextWindow) {
   if (config.compactionMaxRetainedTokens !== void 0 && config.compactionMaxRetainedTokens > 0) {
     return config.compactionMaxRetainedTokens;
@@ -8553,11 +8554,14 @@ agentMaxTokens: 32000
 # Observer chunks allowed synchronously before a compaction; 0 disables.
 compactionCatchUpMaxChunks: 2
 
+# Most unobserved conversation a compaction may keep past omp's cut. Keep it
+# well under omp's compaction threshold so a compaction cannot re-trigger itself.
+compactionMaxRetainedTokens: 30000
+
 # Derived from the model's context window when unset:
 # observerChunkMaxTokens: 60000
 # workerMemoryMaxTokens: 16000
 # compactionSummaryMaxTokens: 8000
-# compactionMaxRetainedTokens: 60000
 
 showWorkerNotifications: true
 # Turn off the automatic workers; commands and the compaction hook stay active.
