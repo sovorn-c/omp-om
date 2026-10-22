@@ -10,7 +10,7 @@ import { resolveCompactionMaxRetainedTokens, resolveCompactionSummaryMaxTokens }
 import { estimateStringTokens } from "../tokens.js";
 import { debugLog, withDebugLogContext, type DebugLogContext } from "../debug-log.js";
 import type { OmpExtensionContext, Runtime } from "../runtime.js";
-import { catchUpObserver } from "./compaction-catch-up.js";
+import { catchUpObserver, type CatchUpResult } from "./compaction-catch-up.js";
 import {
 	OM_OBSERVATIONS_RECORDED,
 	buildCompactionProjection,
@@ -31,17 +31,39 @@ import {
 /** Bound hook work below omp's 30s handler timeout so native fallback can run. */
 export const HOOK_CATCH_UP_DEADLINE_MS = 20_000;
 
-/** Longest the hook waits for a background consolidation, leaving the rest of the deadline for catch-up. */
-export const HOOK_IN_FLIGHT_WAIT_MS = 8_000;
+/** Longest the hook waits for a background consolidation; observer runs on slow models take 10s+. */
+export const HOOK_IN_FLIGHT_WAIT_MS = 15_000;
 
-/** Wait for the in-flight consolidation to settle; false on timeout or abort. */
-async function waitForInFlightConsolidation(runtime: Runtime, signal: AbortSignal | undefined): Promise<boolean> {
+/** Catch-up starts only with at least this much of the deadline left, so a started catch-up has time to record a chunk. */
+export const HOOK_CATCH_UP_MIN_MS = 8_000;
+
+/** Catch-up stops this long before the deadline, leaving time to render the summary. */
+export const HOOK_RENDER_MARGIN_MS = 2_000;
+
+/** How often the wait re-checks whether the background run has left its observer stage. */
+const OBSERVER_PHASE_POLL_MS = 100;
+
+/** A background consolidation is in flight and still observing (its phase is unset until the observer stage starts). */
+function observerInFlight(runtime: Runtime): boolean {
+	return runtime.consolidationInFlight && (runtime.consolidationPhase ?? "observer") === "observer";
+}
+
+/**
+ * Wait until the in-flight consolidation has finished observing: its observer
+ * results are what the cut needs, and its reflector and dropper only read a
+ * snapshot, so catch-up may run beside them. False on timeout or abort.
+ */
+async function waitForInFlightObserver(runtime: Runtime, signal: AbortSignal | undefined): Promise<boolean> {
 	const pending = runtime.consolidationPromise;
-	if (!runtime.consolidationInFlight || !pending) return !runtime.consolidationInFlight;
+	if (!observerInFlight(runtime) || !pending) return !observerInFlight(runtime);
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let poll: ReturnType<typeof setInterval> | undefined;
 	let onAbort: (() => void) | undefined;
-	const stopped = new Promise<false>((resolve) => {
+	const stopped = new Promise<boolean>((resolve) => {
 		timer = setTimeout(() => resolve(false), HOOK_IN_FLIGHT_WAIT_MS);
+		poll = setInterval(() => {
+			if (!observerInFlight(runtime)) resolve(true);
+		}, OBSERVER_PHASE_POLL_MS);
 		onAbort = () => resolve(false);
 		signal?.addEventListener("abort", onAbort, { once: true });
 	});
@@ -49,6 +71,7 @@ async function waitForInFlightConsolidation(runtime: Runtime, signal: AbortSigna
 		return await Promise.race([pending.then(() => true, () => true), stopped]);
 	} finally {
 		clearTimeout(timer);
+		clearInterval(poll);
 		if (onAbort) signal?.removeEventListener("abort", onAbort);
 	}
 }
@@ -238,6 +261,7 @@ async function withCompactionDeadline(
 }
 
 async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEvent, ctx: OmpExtensionContext, runtime: Runtime): Promise<HookResult> {
+	const startedAt = Date.now();
 	if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
 	const resolved = await runtime.resolveModel(ctx);
 	if (event.signal?.aborted) return { cancel: true };
@@ -254,10 +278,10 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 
 	// A background observer run may already be covering the gap. Its result
 	// lands on the branch, so wait (bounded) and re-resolve the cut against it.
-	if (resolution.gap && runtime.consolidationInFlight) {
-		const settled = await waitForInFlightConsolidation(runtime, event.signal);
+	if (resolution.gap && observerInFlight(runtime)) {
+		const settled = await waitForInFlightObserver(runtime, event.signal);
 		if (event.signal?.aborted) return { cancel: true };
-		debugLog("compaction.in_flight_wait", { settled });
+		debugLog("compaction.in_flight_wait", { settled, phase: runtime.consolidationPhase });
 		if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
 		entries = ctx.sessionManager.getBranch() as Entry[];
 		resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
@@ -270,9 +294,32 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 	if (
 		resolution.gap
 		&& runtime.config.compactionCatchUpMaxChunks > 0
-		&& !runtime.consolidationInFlight
+		&& !observerInFlight(runtime)
+		&& Date.now() - startedAt <= HOOK_CATCH_UP_DEADLINE_MS - HOOK_CATCH_UP_MIN_MS
 	) {
-		const catchUp = await catchUpObserver({ pi, runtime, ctx, entries, gap: resolution.gap, resolved, maxChunks: runtime.config.compactionCatchUpMaxChunks, signal: event.signal });
+		// Stop catch-up before the hook deadline: a slow observer is not an
+		// outage, so the hook keeps what it recorded and renders its own summary
+		// instead of handing compaction to omp.
+		const catchUpController = new AbortController();
+		let stopCatchUp!: () => void;
+		const softStop = new Promise<CatchUpResult>((resolve) => {
+			stopCatchUp = () => {
+				catchUpController.abort();
+				resolve({ chunksRecorded: 0, stoppedBecause: "aborted" });
+			};
+		});
+		event.signal?.addEventListener("abort", stopCatchUp, { once: true });
+		const softTimer = setTimeout(stopCatchUp, startedAt + HOOK_CATCH_UP_DEADLINE_MS - HOOK_RENDER_MARGIN_MS - Date.now());
+		let catchUp: CatchUpResult;
+		try {
+			catchUp = await Promise.race([
+				catchUpObserver({ pi, runtime, ctx, entries, gap: resolution.gap, resolved, maxChunks: runtime.config.compactionCatchUpMaxChunks, signal: catchUpController.signal }),
+				softStop,
+			]);
+		} finally {
+			clearTimeout(softTimer);
+			event.signal?.removeEventListener("abort", stopCatchUp);
+		}
 		if (event.signal?.aborted) return { cancel: true };
 		debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
 		if (catchUp.stoppedBecause === "error") {

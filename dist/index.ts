@@ -9346,14 +9346,24 @@ async function catchUpObserver(args) {
 
 // src/hooks/compaction-hook.ts
 var HOOK_CATCH_UP_DEADLINE_MS = 2e4;
-var HOOK_IN_FLIGHT_WAIT_MS = 8e3;
-async function waitForInFlightConsolidation(runtime, signal) {
+var HOOK_IN_FLIGHT_WAIT_MS = 15e3;
+var HOOK_CATCH_UP_MIN_MS = 8e3;
+var HOOK_RENDER_MARGIN_MS = 2e3;
+var OBSERVER_PHASE_POLL_MS = 100;
+function observerInFlight(runtime) {
+  return runtime.consolidationInFlight && (runtime.consolidationPhase ?? "observer") === "observer";
+}
+async function waitForInFlightObserver(runtime, signal) {
   const pending = runtime.consolidationPromise;
-  if (!runtime.consolidationInFlight || !pending) return !runtime.consolidationInFlight;
+  if (!observerInFlight(runtime) || !pending) return !observerInFlight(runtime);
   let timer;
+  let poll;
   let onAbort;
   const stopped = new Promise((resolve) => {
     timer = setTimeout(() => resolve(false), HOOK_IN_FLIGHT_WAIT_MS);
+    poll = setInterval(() => {
+      if (!observerInFlight(runtime)) resolve(true);
+    }, OBSERVER_PHASE_POLL_MS);
     onAbort = () => resolve(false);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
@@ -9361,6 +9371,7 @@ async function waitForInFlightConsolidation(runtime, signal) {
     return await Promise.race([pending.then(() => true, () => true), stopped]);
   } finally {
     clearTimeout(timer);
+    clearInterval(poll);
     if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
 }
@@ -9482,6 +9493,7 @@ async function withCompactionDeadline(signal, ctx, runtime, work) {
   }
 }
 async function handleCompaction(pi, event, ctx, runtime) {
+  const startedAt = Date.now();
   if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
   const resolved = await runtime.resolveModel(ctx);
   if (event.signal?.aborted) return { cancel: true };
@@ -9495,16 +9507,35 @@ async function handleCompaction(pi, event, ctx, runtime) {
   const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
   const poolMaxTokens = observationsPoolMaxTokens(runtime);
   let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
-  if (resolution.gap && runtime.consolidationInFlight) {
-    const settled = await waitForInFlightConsolidation(runtime, event.signal);
+  if (resolution.gap && observerInFlight(runtime)) {
+    const settled = await waitForInFlightObserver(runtime, event.signal);
     if (event.signal?.aborted) return { cancel: true };
-    debugLog("compaction.in_flight_wait", { settled });
+    debugLog("compaction.in_flight_wait", { settled, phase: runtime.consolidationPhase });
     if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
     entries = ctx.sessionManager.getBranch();
     resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
   }
-  if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !runtime.consolidationInFlight) {
-    const catchUp = await catchUpObserver({ pi, runtime, ctx, entries, gap: resolution.gap, resolved, maxChunks: runtime.config.compactionCatchUpMaxChunks, signal: event.signal });
+  if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !observerInFlight(runtime) && Date.now() - startedAt <= HOOK_CATCH_UP_DEADLINE_MS - HOOK_CATCH_UP_MIN_MS) {
+    const catchUpController = new AbortController();
+    let stopCatchUp;
+    const softStop = new Promise((resolve) => {
+      stopCatchUp = () => {
+        catchUpController.abort();
+        resolve({ chunksRecorded: 0, stoppedBecause: "aborted" });
+      };
+    });
+    event.signal?.addEventListener("abort", stopCatchUp, { once: true });
+    const softTimer = setTimeout(stopCatchUp, startedAt + HOOK_CATCH_UP_DEADLINE_MS - HOOK_RENDER_MARGIN_MS - Date.now());
+    let catchUp;
+    try {
+      catchUp = await Promise.race([
+        catchUpObserver({ pi, runtime, ctx, entries, gap: resolution.gap, resolved, maxChunks: runtime.config.compactionCatchUpMaxChunks, signal: catchUpController.signal }),
+        softStop
+      ]);
+    } finally {
+      clearTimeout(softTimer);
+      event.signal?.removeEventListener("abort", stopCatchUp);
+    }
     if (event.signal?.aborted) return { cancel: true };
     debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
     if (catchUp.stoppedBecause === "error") {

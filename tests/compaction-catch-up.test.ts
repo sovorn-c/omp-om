@@ -7,7 +7,7 @@ vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
 	runObserver: mockAgents.runObserver,
 }));
 
-import { HOOK_CATCH_UP_DEADLINE_MS, HOOK_IN_FLIGHT_WAIT_MS, registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import { HOOK_CATCH_UP_DEADLINE_MS, HOOK_CATCH_UP_MIN_MS, HOOK_IN_FLIGHT_WAIT_MS, HOOK_RENDER_MARGIN_MS, registerCompactionHook } from "../src/hooks/compaction-hook.js";
 import { OM_OBSERVATIONS_RECORDED } from "../src/session-ledger/index.js";
 import { compactionEntry, observation, observationsRecordedEntry, rawMessage, resetBoundary, type TestEntry } from "./fixtures/session.js";
 
@@ -255,6 +255,56 @@ describe("compaction hook synchronous catch-up", () => {
 		expect(result.compaction.firstKeptEntryId).toBe("u2");
 	});
 
+	it("waits past 8s for a slow in-flight consolidation that covers the gap", async () => {
+		vi.useFakeTimers();
+		const inFlight = { finish: () => {} };
+		const { run, getEntries, setEntries } = setup({ entries: laggingBranch(), inFlight });
+
+		const pending = run("u2");
+		await vi.advanceTimersByTimeAsync(11_000);
+		setEntries([...getEntries(), coverage("om-a2", "a2", "cccccccccccc")]);
+		inFlight.finish();
+		const result = await pending as any;
+
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.summary).not.toContain("model-free");
+	});
+
+	it("skips catch-up when the in-flight consolidation settles too late to observe the rest", async () => {
+		vi.useFakeTimers();
+		const inFlight = { finish: () => {} };
+		const { run, runtime } = setup({ entries: laggingBranch(), inFlight });
+
+		const pending = run("u2");
+		await vi.advanceTimersByTimeAsync(HOOK_CATCH_UP_DEADLINE_MS - HOOK_CATCH_UP_MIN_MS + 1);
+		inFlight.finish();
+		const result = await pending as any;
+
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
+		expect(result.compaction.firstKeptEntryId).toBe("a1");
+		expect((runtime as any).memoryFailureReason).toBeUndefined();
+	});
+
+	it("catches up once the in-flight consolidation moves past its observer stage, without waiting for the reflector", async () => {
+		vi.useFakeTimers();
+		const gapObs = observation("cccccccccccc", { sourceEntryIds: ["t1", "a2"], tokenCount: 12 });
+		mockAgents.runObserver.mockResolvedValueOnce([gapObs]);
+		const inFlight = { finish: () => {} };
+		const { run, runtime } = setup({ entries: laggingBranch(), inFlight });
+
+		const pending = run("u2");
+		await vi.advanceTimersByTimeAsync(3_000);
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
+		(runtime as any).consolidationPhase = "reflector";
+		await vi.advanceTimersByTimeAsync(200);
+		const result = await pending as any;
+
+		expect(runtime.consolidationInFlight).toBe(true);
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+	});
+
 	it("retains the tail without catch-up when the in-flight consolidation outlasts the wait", async () => {
 		vi.useFakeTimers();
 		const { run, runtime } = setup({ entries: laggingBranch(), inFlight: { finish: () => {} } });
@@ -373,31 +423,31 @@ describe("compaction hook deadline and failure handling", () => {
 	const warningsOf = (ctx: { ui: { notify: ReturnType<typeof vi.fn> } }): string[] =>
 		ctx.ui.notify.mock.calls.filter(([, level]) => level === "warning").map(([message]) => message as string);
 
-	it("catch-up that never resolves is cut at HOOK_CATCH_UP_DEADLINE_MS", async () => {
+	it("stops a catch-up that never resolves before the deadline and compacts with its own summary", async () => {
 		vi.useFakeTimers();
 		let observerSignal: AbortSignal | undefined;
 		mockAgents.runObserver.mockImplementation(({ signal }: { signal?: AbortSignal }) => {
 			observerSignal = signal;
 			return new Promise(() => {});
 		});
-		const { run, ctx, pi } = setup({ entries: laggingBranch() });
+		const { run, pi, runtime } = setup({ entries: laggingBranch() });
 		let settled = false;
 		const pending = run("u2").then((value) => {
 			settled = true;
 			return value;
 		});
 
-		await vi.advanceTimersByTimeAsync(HOOK_CATCH_UP_DEADLINE_MS - 1);
+		await vi.advanceTimersByTimeAsync(HOOK_CATCH_UP_DEADLINE_MS - HOOK_RENDER_MARGIN_MS - 1);
 		expect(settled).toBe(false);
 		expect(observerSignal?.aborted).toBe(false);
 
 		await vi.advanceTimersByTimeAsync(1);
 		const result = await pending as any;
 
-		expect(result).toBeUndefined();
+		expect(result.compaction).toBeDefined();
+		expect((runtime as any).memoryFailureReason).toBeUndefined();
 		expect(observerSignal?.aborted).toBe(true);
 		expect(pi.appendEntry).not.toHaveBeenCalled();
-		expect(warningsOf(ctx).some((message) => message.includes("deadline"))).toBe(true);
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
@@ -431,7 +481,7 @@ describe("compaction hook deadline and failure handling", () => {
 		const result = await pending as any;
 
 		expect(pi.appendEntry).toHaveBeenCalledTimes(1);
-		expect(result).toBeUndefined();
+		expect(result.compaction).toBeDefined();
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, expect.objectContaining({ coversUpToId: "t1" }));
 	});
 
