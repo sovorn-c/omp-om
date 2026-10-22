@@ -121,9 +121,13 @@ export class Runtime {
 	/** Problems found while loading `omp-om.yml` (malformed files, removed or invalid keys); shown by `/om:status`. */
 	configWarnings: string[] = [];
 	configLoaded = false;
-	consolidationInFlight = false;
-	consolidationPromise: Promise<void> | null = null;
-	consolidationPhase: ConsolidationPhase | undefined;
+	/** Observer lane: only the observer stage; never overlaps itself. */
+	observerInFlight = false;
+	observerPromise: Promise<void> | null = null;
+	/** Maintenance lane: reflector then dropper; never overlaps itself, may overlap the observer lane. */
+	maintenanceInFlight = false;
+	maintenancePromise: Promise<void> | null = null;
+	maintenancePhase: "reflector" | "dropper" | undefined;
 	compactHookInFlight = false;
 	/** Set by failed memory work; only a completed worker request clears it. */
 	memoryFailureReason: string | undefined;
@@ -322,18 +326,28 @@ export class Runtime {
 		return recovered;
 	}
 
-	launchConsolidationTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {
-		this.consolidationInFlight = true;
-		this.consolidationPhase = undefined;
+	launchObserverTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {
+		this.observerInFlight = true;
 		this.lastObserverError = undefined;
+		const promise = this.launchTrackedTask(ctx, work, () => "observer", () => {
+			this.observerInFlight = false;
+			if (this.observerPromise === promise) this.observerPromise = null;
+		});
+		this.observerPromise = promise;
+		return promise;
+	}
+
+	launchMaintenanceTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {
+		this.maintenanceInFlight = true;
+		this.maintenancePhase = undefined;
 		this.lastReflectorError = undefined;
 		this.lastDropperError = undefined;
-		const promise = this.launchTrackedTask(ctx, work, () => {
-			this.consolidationInFlight = false;
-			this.consolidationPhase = undefined;
-			if (this.consolidationPromise === promise) this.consolidationPromise = null;
+		const promise = this.launchTrackedTask(ctx, work, () => this.maintenancePhase ?? "reflector", () => {
+			this.maintenanceInFlight = false;
+			this.maintenancePhase = undefined;
+			if (this.maintenancePromise === promise) this.maintenancePromise = null;
 		});
-		this.consolidationPromise = promise;
+		this.maintenancePromise = promise;
 		return promise;
 	}
 
@@ -358,6 +372,7 @@ export class Runtime {
 	private launchTrackedTask(
 		ctx: LaunchCtx,
 		work: () => Promise<void>,
+		phase: () => ConsolidationPhase,
 		onFinally: (error: string | undefined) => void,
 	): Promise<void> {
 		return (async () => {
@@ -366,7 +381,7 @@ export class Runtime {
 				await work();
 			} catch (error) {
 				errorMessage = error instanceof Error ? error.message : String(error);
-				this.recordConsolidationStageError(ctx, this.consolidationPhase ?? "observer", errorMessage);
+				this.recordConsolidationStageError(ctx, phase(), errorMessage);
 			} finally {
 				onFinally(errorMessage);
 			}

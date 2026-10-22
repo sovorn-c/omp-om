@@ -11,7 +11,7 @@ vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: workers.refle
 vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: workers.drop }));
 
 import { Runtime } from "../src/runtime.js";
-import { runConsolidationPipeline } from "../src/hooks/consolidation-trigger.js";
+import { runMaintenanceLane, runObserverLane } from "../src/hooks/consolidation-trigger.js";
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
 import { observation, observationsRecordedEntry, rawMessage, type TestEntry } from "./fixtures/session.js";
 
@@ -36,7 +36,10 @@ function setup(entries: TestEntry[] = [rawMessage("raw-1", "Remember the deploym
 	registerCompactionHook(extension, runtime);
 	return {
 		runtime, ctx, pi,
-		consolidate: () => runtime.launchConsolidationTask(ctx, () => runConsolidationPipeline(extension, runtime, ctx)),
+		consolidate: async () => {
+			await runtime.launchObserverTask(ctx, () => runObserverLane(extension, runtime, ctx));
+			await runtime.launchMaintenanceTask(ctx, () => runMaintenanceLane(extension, runtime, ctx));
+		},
 		compact: () => {
 			// The hook only reads these preparation fields in this fixture.
 			const event = { preparation: { firstKeptEntryId: "raw-1", tokensBefore: 1000 }, branchEntries: entries } as unknown as SessionBeforeCompactEvent;
@@ -101,7 +104,7 @@ describe("memory failure leaves native omp running", () => {
 		expect(app.pi.appendEntry).not.toHaveBeenCalled();
 		await expect(app.compact()).resolves.toBeUndefined();
 		await app.runtime.resolveModel(app.ctx);
-		await app.runtime.launchConsolidationTask(app.ctx, async () => {});
+		await app.runtime.launchObserverTask(app.ctx, async () => {});
 		expect(app.runtime.memoryFailureReason).toContain("connection refused");
 		await app.consolidate();
 		expect(app.runtime.memoryFailureReason).toBeUndefined();
@@ -139,6 +142,7 @@ describe("memory failure leaves native omp running", () => {
 		await expect(app.consolidate()).resolves.toBeUndefined();
 		expect(app.runtime.memoryFailureReason).toContain("connection refused");
 		await expect(app.compact()).resolves.toBeUndefined();
-		expect(app.runtime.consolidationInFlight).toBe(false);
+		expect(app.runtime.observerInFlight).toBe(false);
+		expect(app.runtime.maintenanceInFlight).toBe(false);
 	});
 });

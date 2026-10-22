@@ -33,8 +33,9 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; model?: unk
 			observationsPoolTargetTokens: 20,
 			passive: false,
 		},
-		consolidationInFlight: false,
-		consolidationPhase: undefined,
+		observerInFlight: false,
+		maintenanceInFlight: false,
+		maintenancePhase: undefined,
 		compactHookInFlight: false,
 		configWarnings: [],
 		lastObserverError: undefined,
@@ -171,13 +172,14 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Active observation pool: ~25 / 20 target tokens (125%)");
 	});
 
-	it("shows passive mode, consolidation in flight, compaction hook in flight, and stage-specific last errors", async () => {
+	it("shows passive mode, maintenance in flight, compaction hook in flight, and stage-specific last errors", async () => {
 		const output = await setup({
 			entries: [],
 			runtime: {
 				config: { observeAfterTokens: 10, reflectAfterTokens: 20, observationsPoolMaxTokens: 40, observationsPoolTargetTokens: 20, passive: true },
-				consolidationInFlight: true,
-				consolidationPhase: "reflector",
+				observerInFlight: false,
+				maintenanceInFlight: true,
+				maintenancePhase: "reflector",
 				compactHookInFlight: true,
 				lastObserverError: "observer failed",
 				lastReflectorError: "reflect failed",
@@ -186,7 +188,7 @@ describe("V3 /om:status", () => {
 		}).run();
 
 		expect(output).toContain("Passive: automatic memory workers disabled");
-		expect(output).toContain("Consolidation: running (reflector)");
+		expect(output).toContain("Maintenance: running (reflector)");
 		expect(output).not.toContain("Observer: running");
 		expect(output).not.toContain("Reflect/drop: running");
 		expect(output).toContain("Compaction hook: running");
@@ -196,11 +198,18 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Dropper: drop failed");
 	});
 
-	it("shows consolidation in flight without phase when phase is unavailable", async () => {
-		const output = await setup({ entries: [], runtime: { consolidationInFlight: true } }).run();
+	it("shows observer and maintenance lanes in flight separately", async () => {
+		const output = await setup({ entries: [], runtime: { observerInFlight: true, maintenanceInFlight: true, maintenancePhase: "dropper" } }).run();
 
-		expect(output).toContain("Consolidation: running");
-		expect(output).not.toContain("Consolidation: running (");
+		expect(output).toContain("Observer: running");
+		expect(output).toContain("Maintenance: running (dropper)");
+	});
+
+	it("shows maintenance in flight without phase when phase is unavailable", async () => {
+		const output = await setup({ entries: [], runtime: { maintenanceInFlight: true } }).run();
+
+		expect(output).toContain("Maintenance: running");
+		expect(output).not.toContain("Maintenance: running (");
 	});
 
 	it("lists config warnings and omits the section when there are none", async () => {

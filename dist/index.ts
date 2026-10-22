@@ -8340,11 +8340,12 @@ function registerStatusCommand(pi, runtime) {
         `Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
         `Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`
       ];
-      if (runtime.consolidationInFlight || runtime.compactHookInFlight) {
+      if (runtime.observerInFlight || runtime.maintenanceInFlight || runtime.compactHookInFlight) {
         lines.push("", "\u2500\u2500 In flight \u2500\u2500");
-        if (runtime.consolidationInFlight) {
-          const phase = runtime.consolidationPhase ? ` (${runtime.consolidationPhase})` : "";
-          lines.push(`Consolidation: running${phase}`);
+        if (runtime.observerInFlight) lines.push("Observer: running");
+        if (runtime.maintenanceInFlight) {
+          const phase = runtime.maintenancePhase ? ` (${runtime.maintenancePhase})` : "";
+          lines.push(`Maintenance: running${phase}`);
         }
         if (runtime.compactHookInFlight) lines.push("Compaction hook: running");
       }
@@ -9361,10 +9362,10 @@ var HOOK_CATCH_UP_MIN_MS = 8e3;
 var HOOK_RENDER_MARGIN_MS = 2e3;
 var OBSERVER_PHASE_POLL_MS = 100;
 function observerInFlight(runtime) {
-  return runtime.consolidationInFlight && (runtime.consolidationPhase ?? "observer") === "observer";
+  return runtime.observerInFlight;
 }
 async function waitForInFlightObserver(runtime, signal) {
-  const pending = runtime.consolidationPromise;
+  const pending = runtime.observerPromise;
   if (!observerInFlight(runtime) || !pending) return !observerInFlight(runtime);
   let timer;
   let poll;
@@ -9520,7 +9521,7 @@ async function handleCompaction(pi, event, ctx, runtime) {
   if (resolution.gap && observerInFlight(runtime)) {
     const settled = await waitForInFlightObserver(runtime, event.signal);
     if (event.signal?.aborted) return { cancel: true };
-    debugLog("compaction.in_flight_wait", { settled, phase: runtime.consolidationPhase });
+    debugLog("compaction.in_flight_wait", { settled });
     if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
     entries = ctx.sessionManager.getBranch();
     resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
@@ -10300,9 +10301,6 @@ function stageTokens(entries, customType, currentTokens, rawEstimateFn) {
   const real = currentTokens !== void 0 ? realTokensSinceAnchor(entries, customType, currentTokens) : void 0;
   return real !== void 0 ? Math.max(raw, real) : raw;
 }
-function anyStageDue(entries, runtime, currentTokens) {
-  return stageDue(entries, runtime, currentTokens, OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens) || stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, observedTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
-}
 function shouldNotifyWorker(runtime, ctx) {
   return runtime.config.showWorkerNotifications && ctx.hasUI;
 }
@@ -10366,13 +10364,14 @@ function debugSessionMetadata(ctx) {
   }
 }
 function maybeLaunchConsolidation(pi, runtime, ctx) {
-  if (ctx.agent?.kind === "sub") return void 0;
+  if (ctx.agent?.kind === "sub") return;
   runtime.ensureConfig(ctx.cwd);
-  if (runtime.config.passive === true) return void 0;
-  if (runtime.consolidationInFlight) return void 0;
+  if (runtime.config.passive === true) return;
   const entries = ctx.sessionManager.getBranch();
-  if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return void 0;
-  const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+  const currentTokens = realContextTokens(ctx);
+  const observerDue = !runtime.observerInFlight && stageDue(entries, runtime, currentTokens, OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens);
+  const maintenanceDue = !runtime.maintenanceInFlight && stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, observedTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
+  if (!observerDue && !maintenanceDue) return;
   const consolidationCtx = {
     cwd: ctx.cwd,
     hasUI: ctx.hasUI,
@@ -10383,26 +10382,30 @@ function maybeLaunchConsolidation(pi, runtime, ctx) {
     sessionManager: ctx.sessionManager
   };
   const sessionMetadata = debugSessionMetadata(ctx);
-  return runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({
+  const debugContext2 = (lane) => ({
     enabled: runtime.config.debugLog === true,
     cwd: ctx.cwd,
     ...sessionMetadata,
-    runId
-  }, async () => {
-    await runConsolidationPipeline(pi, runtime, consolidationCtx);
-  }));
+    runId: `${lane}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`
+  });
+  if (observerDue) {
+    runtime.launchObserverTask(ctx, () => withDebugLogContext(debugContext2("observer"), () => runObserverLane(pi, runtime, consolidationCtx)));
+  }
+  if (maintenanceDue) {
+    runtime.launchMaintenanceTask(ctx, () => withDebugLogContext(debugContext2("maintenance"), () => runMaintenanceLane(pi, runtime, consolidationCtx)));
+  }
 }
-async function runConsolidationPipeline(pi, runtime, ctx) {
+async function runObserverLane(pi, runtime, ctx) {
   const resolver = makeModelResolver(runtime, ctx);
-  runtime.consolidationPhase = "observer";
   try {
-    const observerOutcome = await runObserverStage(pi, runtime, ctx, resolver);
-    if (observerOutcome === "abort") return;
+    await runObserverStage(pi, runtime, ctx, resolver);
   } catch (error) {
     debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
-    return;
   }
-  runtime.consolidationPhase = "reflector";
+}
+async function runMaintenanceLane(pi, runtime, ctx) {
+  const resolver = makeModelResolver(runtime, ctx);
+  runtime.maintenancePhase = "reflector";
   let reflectorResult;
   try {
     reflectorResult = await runReflectorStage(pi, runtime, ctx, resolver);
@@ -10411,7 +10414,7 @@ async function runConsolidationPipeline(pi, runtime, ctx) {
     debugLog("reflector.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "reflector", error) });
     return;
   }
-  runtime.consolidationPhase = "dropper";
+  runtime.maintenancePhase = "dropper";
   try {
     await runDropperStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
   } catch (error) {
@@ -10671,9 +10674,13 @@ var Runtime = class {
   /** Problems found while loading `omp-om.yml` (malformed files, removed or invalid keys); shown by `/om:status`. */
   configWarnings = [];
   configLoaded = false;
-  consolidationInFlight = false;
-  consolidationPromise = null;
-  consolidationPhase;
+  /** Observer lane: only the observer stage; never overlaps itself. */
+  observerInFlight = false;
+  observerPromise = null;
+  /** Maintenance lane: reflector then dropper; never overlaps itself, may overlap the observer lane. */
+  maintenanceInFlight = false;
+  maintenancePromise = null;
+  maintenancePhase;
   compactHookInFlight = false;
   /** Set by failed memory work; only a completed worker request clears it. */
   memoryFailureReason;
@@ -10805,18 +10812,27 @@ var Runtime = class {
     });
     return recovered;
   }
-  launchConsolidationTask(ctx, work) {
-    this.consolidationInFlight = true;
-    this.consolidationPhase = void 0;
+  launchObserverTask(ctx, work) {
+    this.observerInFlight = true;
     this.lastObserverError = void 0;
+    const promise = this.launchTrackedTask(ctx, work, () => "observer", () => {
+      this.observerInFlight = false;
+      if (this.observerPromise === promise) this.observerPromise = null;
+    });
+    this.observerPromise = promise;
+    return promise;
+  }
+  launchMaintenanceTask(ctx, work) {
+    this.maintenanceInFlight = true;
+    this.maintenancePhase = void 0;
     this.lastReflectorError = void 0;
     this.lastDropperError = void 0;
-    const promise = this.launchTrackedTask(ctx, work, () => {
-      this.consolidationInFlight = false;
-      this.consolidationPhase = void 0;
-      if (this.consolidationPromise === promise) this.consolidationPromise = null;
+    const promise = this.launchTrackedTask(ctx, work, () => this.maintenancePhase ?? "reflector", () => {
+      this.maintenanceInFlight = false;
+      this.maintenancePhase = void 0;
+      if (this.maintenancePromise === promise) this.maintenancePromise = null;
     });
-    this.consolidationPromise = promise;
+    this.maintenancePromise = promise;
     return promise;
   }
   recordConsolidationStageError(ctx, phase, error) {
@@ -10835,14 +10851,14 @@ var Runtime = class {
     }
     return message;
   }
-  launchTrackedTask(ctx, work, onFinally) {
+  launchTrackedTask(ctx, work, phase, onFinally) {
     return (async () => {
       let errorMessage3;
       try {
         await work();
       } catch (error) {
         errorMessage3 = error instanceof Error ? error.message : String(error);
-        this.recordConsolidationStageError(ctx, this.consolidationPhase ?? "observer", errorMessage3);
+        this.recordConsolidationStageError(ctx, phase(), errorMessage3);
       } finally {
         onFinally(errorMessage3);
       }

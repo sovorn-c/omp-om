@@ -43,9 +43,9 @@ export const HOOK_RENDER_MARGIN_MS = 2_000;
 /** How often the wait re-checks whether the background run has left its observer stage. */
 const OBSERVER_PHASE_POLL_MS = 100;
 
-/** A background consolidation is in flight and still observing (its phase is unset until the observer stage starts). */
+/** The observer lane is in flight. The maintenance lane (reflector, dropper) is deliberately not waited on. */
 function observerInFlight(runtime: Runtime): boolean {
-	return runtime.consolidationInFlight && (runtime.consolidationPhase ?? "observer") === "observer";
+	return runtime.observerInFlight;
 }
 
 /**
@@ -54,7 +54,7 @@ function observerInFlight(runtime: Runtime): boolean {
  * snapshot, so catch-up may run beside them. False on timeout or abort.
  */
 async function waitForInFlightObserver(runtime: Runtime, signal: AbortSignal | undefined): Promise<boolean> {
-	const pending = runtime.consolidationPromise;
+	const pending = runtime.observerPromise;
 	if (!observerInFlight(runtime) || !pending) return !observerInFlight(runtime);
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let poll: ReturnType<typeof setInterval> | undefined;
@@ -281,7 +281,7 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 	if (resolution.gap && observerInFlight(runtime)) {
 		const settled = await waitForInFlightObserver(runtime, event.signal);
 		if (event.signal?.aborted) return { cancel: true };
-		debugLog("compaction.in_flight_wait", { settled, phase: runtime.consolidationPhase });
+		debugLog("compaction.in_flight_wait", { settled });
 		if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
 		entries = ctx.sessionManager.getBranch() as Entry[];
 		resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });

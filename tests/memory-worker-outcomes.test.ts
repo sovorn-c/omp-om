@@ -13,7 +13,7 @@ vi.mock("../src/agents/agent-loop.js", async (original) => ({
 }));
 
 import { Runtime } from "../src/runtime.js";
-import { runConsolidationPipeline } from "../src/hooks/consolidation-trigger.js";
+import { runMaintenanceLane, runObserverLane } from "../src/hooks/consolidation-trigger.js";
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
 
 const partialFailure: WorkerAgentLoop = (_prompts, context) => ({
@@ -42,7 +42,10 @@ function setup(entries: TestEntry[] = [rawMessage("raw-1", "Deploy to eu-west-1"
 	registerCompactionHook(extension, runtime);
 	return {
 		runtime, ctx, pi,
-		consolidate: () => runtime.launchConsolidationTask(ctx, () => runConsolidationPipeline(extension, runtime, ctx)),
+		consolidate: async () => {
+			await runtime.launchObserverTask(ctx, () => runObserverLane(extension, runtime, ctx));
+			await runtime.launchMaintenanceTask(ctx, () => runMaintenanceLane(extension, runtime, ctx));
+		},
 		compact: () => compact({ preparation: { firstKeptEntryId: "raw-2", tokensBefore: 1000 }, branchEntries: entries } as unknown as SessionBeforeCompactEvent, ctx as unknown as OmpExtensionContext),
 	};
 }

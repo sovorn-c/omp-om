@@ -210,17 +210,20 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 	}
 }
 
-/** Launch a consolidation run when any stage is due. Returns its promise, or undefined when nothing launched. */
-function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): Promise<void> | undefined {
-	if (ctx.agent?.kind === "sub") return undefined;
+/** Launch each consolidation lane whose stage is due and whose lane is free. */
+function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
+	if (ctx.agent?.kind === "sub") return;
 	runtime.ensureConfig(ctx.cwd);
-	if (runtime.config.passive === true) return undefined;
-	if (runtime.consolidationInFlight) return undefined;
+	if (runtime.config.passive === true) return;
 
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return undefined;
+	const currentTokens = realContextTokens(ctx);
+	const observerDue = !runtime.observerInFlight
+		&& stageDue(entries, runtime, currentTokens, OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens);
+	const maintenanceDue = !runtime.maintenanceInFlight
+		&& stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, observedTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
+	if (!observerDue && !maintenanceDue) return;
 
-	const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
 	const consolidationCtx: ConsolidationCtx = {
 		cwd: ctx.cwd,
 		hasUI: ctx.hasUI,
@@ -230,35 +233,45 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		getContextUsage: ctx.getContextUsage,
 		sessionManager: ctx.sessionManager,
 	};
-
 	const sessionMetadata = debugSessionMetadata(ctx);
-	return runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({
+	const debugContext = (lane: "observer" | "maintenance") => ({
 		enabled: runtime.config.debugLog === true,
 		cwd: ctx.cwd,
 		...sessionMetadata,
-		runId,
-	}, async () => {
-		await runConsolidationPipeline(pi, runtime, consolidationCtx);
-	}));
+		runId: `${lane}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`,
+	});
+
+	if (observerDue) {
+		runtime.launchObserverTask(ctx, () => withDebugLogContext(debugContext("observer"), () => runObserverLane(pi, runtime, consolidationCtx)));
+	}
+	if (maintenanceDue) {
+		runtime.launchMaintenanceTask(ctx, () => withDebugLogContext(debugContext("maintenance"), () => runMaintenanceLane(pi, runtime, consolidationCtx)));
+	}
 }
 
-export async function runConsolidationPipeline(
+/** Observer lane: the observer stage only. Never waits on, or is waited on by, the maintenance lane. */
+export async function runObserverLane(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	ctx: ConsolidationCtx,
+): Promise<void> {
+	const resolver = makeModelResolver(runtime, ctx);
+	try {
+		await runObserverStage(pi, runtime, ctx, resolver);
+	} catch (error) {
+		debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
+	}
+}
+
+/** Maintenance lane: reflector, then dropper only after a same-run reflection. */
+export async function runMaintenanceLane(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
 ): Promise<void> {
 	const resolver = makeModelResolver(runtime, ctx);
 
-	runtime.consolidationPhase = "observer";
-	try {
-		const observerOutcome = await runObserverStage(pi, runtime, ctx, resolver);
-		if (observerOutcome === "abort") return;
-	} catch (error) {
-		debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
-		return;
-	}
-
-	runtime.consolidationPhase = "reflector";
+	runtime.maintenancePhase = "reflector";
 	let reflectorResult: ReflectorStageResult;
 	try {
 		reflectorResult = await runReflectorStage(pi, runtime, ctx, resolver);
@@ -268,7 +281,7 @@ export async function runConsolidationPipeline(
 		return;
 	}
 
-	runtime.consolidationPhase = "dropper";
+	runtime.maintenancePhase = "dropper";
 	try {
 		await runDropperStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
 	} catch (error) {

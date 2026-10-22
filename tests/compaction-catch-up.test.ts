@@ -87,8 +87,9 @@ function setup(args: {
 			model: "@smol",
 		},
 		compactHookInFlight: false,
-		consolidationInFlight: false,
-		consolidationPromise: null as Promise<void> | null,
+		observerInFlight: false,
+		observerPromise: null as Promise<void> | null,
+		maintenanceInFlight: false,
 		resolveModel: vi.fn(async () => (args.resolveOk === false
 			? { ok: false, reason: "no model" }
 			: { ok: true, model: { provider: "gtr7", id: "memory", contextWindow: 65536 }, apiKey: "key" })),
@@ -98,11 +99,11 @@ function setup(args: {
 	};
 	if (args.inFlight) {
 		const inFlight = args.inFlight;
-		runtime.consolidationInFlight = true;
-		runtime.consolidationPromise = new Promise<void>((resolve) => {
+		runtime.observerInFlight = true;
+		runtime.observerPromise = new Promise<void>((resolve) => {
 			inFlight.finish = () => {
-				runtime.consolidationInFlight = false;
-				runtime.consolidationPromise = null;
+				runtime.observerInFlight = false;
+				runtime.observerPromise = null;
 				resolve();
 			};
 		});
@@ -296,11 +297,13 @@ describe("compaction hook synchronous catch-up", () => {
 		const pending = run("u2");
 		await vi.advanceTimersByTimeAsync(3_000);
 		expect(mockAgents.runObserver).not.toHaveBeenCalled();
-		(runtime as any).consolidationPhase = "reflector";
+		// The maintenance lane (reflector) runs once the observer lane is done; it must not hold the hook.
+		(runtime as any).maintenanceInFlight = true;
+		inFlight.finish();
 		await vi.advanceTimersByTimeAsync(200);
 		const result = await pending as any;
 
-		expect(runtime.consolidationInFlight).toBe(true);
+		expect(runtime.maintenanceInFlight).toBe(true);
 		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
 		expect(result.compaction.firstKeptEntryId).toBe("u2");
 	});
