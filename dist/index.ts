@@ -10363,15 +10363,18 @@ function debugSessionMetadata(ctx) {
     return {};
   }
 }
+function maybeLaunchMaintenance(pi, runtime, ctx, debugContext2) {
+  if (runtime.maintenanceInFlight) return;
+  const entries = ctx.sessionManager.getBranch();
+  if (!stageDue(entries, runtime, realContextTokens(ctx), OM_REFLECTIONS_RECORDED, observedTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens)) return;
+  runtime.launchMaintenanceTask(ctx, () => withDebugLogContext(debugContext2("maintenance"), () => runMaintenanceLane(pi, runtime, ctx)));
+}
 function maybeLaunchConsolidation(pi, runtime, ctx) {
   if (ctx.agent?.kind === "sub") return;
   runtime.ensureConfig(ctx.cwd);
   if (runtime.config.passive === true) return;
   const entries = ctx.sessionManager.getBranch();
-  const currentTokens = realContextTokens(ctx);
-  const observerDue = !runtime.observerInFlight && stageDue(entries, runtime, currentTokens, OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens);
-  const maintenanceDue = !runtime.maintenanceInFlight && stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, observedTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
-  if (!observerDue && !maintenanceDue) return;
+  const observerDue = !runtime.observerInFlight && stageDue(entries, runtime, realContextTokens(ctx), OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens);
   const consolidationCtx = {
     cwd: ctx.cwd,
     hasUI: ctx.hasUI,
@@ -10389,11 +10392,12 @@ function maybeLaunchConsolidation(pi, runtime, ctx) {
     runId: `${lane}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`
   });
   if (observerDue) {
-    runtime.launchObserverTask(ctx, () => withDebugLogContext(debugContext2("observer"), () => runObserverLane(pi, runtime, consolidationCtx)));
+    runtime.launchObserverTask(ctx, async () => {
+      await withDebugLogContext(debugContext2("observer"), () => runObserverLane(pi, runtime, consolidationCtx));
+      if (runtime.lastObserverError === void 0) maybeLaunchMaintenance(pi, runtime, consolidationCtx, debugContext2);
+    });
   }
-  if (maintenanceDue) {
-    runtime.launchMaintenanceTask(ctx, () => withDebugLogContext(debugContext2("maintenance"), () => runMaintenanceLane(pi, runtime, consolidationCtx)));
-  }
+  maybeLaunchMaintenance(pi, runtime, consolidationCtx, debugContext2);
 }
 async function runObserverLane(pi, runtime, ctx) {
   const resolver = makeModelResolver(runtime, ctx);

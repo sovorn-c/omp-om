@@ -479,8 +479,6 @@ describe("V3 consolidation trigger", () => {
 
 		fire();
 		await runLaunchedWork();
-		fire();
-		await runLaunchedWork();
 
 		expect(ctx.ui.notify.mock.calls).toEqual([
 			[expect.stringMatching(/^Observational memory: observer running on ~\d+-token chunk$/), "info"],
@@ -623,15 +621,13 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 	});
 
-	it("observer append makes the reflector due on the next launch evaluation", async () => {
+	it("starts the reflector as soon as an observer append makes it due, without another event", async () => {
 		mockAgents.runObserver.mockResolvedValueOnce([obsA]);
 		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
 		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const { fire, runLaunchedWork, pi } = setup({ entries });
 
-		fire();
-		await runLaunchedWork();
 		fire();
 		await runLaunchedWork();
 
