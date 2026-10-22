@@ -9346,6 +9346,24 @@ async function catchUpObserver(args) {
 
 // src/hooks/compaction-hook.ts
 var HOOK_CATCH_UP_DEADLINE_MS = 2e4;
+var HOOK_IN_FLIGHT_WAIT_MS = 8e3;
+async function waitForInFlightConsolidation(runtime, signal) {
+  const pending = runtime.consolidationPromise;
+  if (!runtime.consolidationInFlight || !pending) return !runtime.consolidationInFlight;
+  let timer;
+  let onAbort;
+  const stopped = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), HOOK_IN_FLIGHT_WAIT_MS);
+    onAbort = () => resolve(false);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([pending.then(() => true, () => true), stopped]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+  }
+}
 var DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 2e4;
 function observationsPoolMaxTokens(runtime) {
   const value = runtime.config.observationsPoolMaxTokens;
@@ -9477,6 +9495,14 @@ async function handleCompaction(pi, event, ctx, runtime) {
   const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
   const poolMaxTokens = observationsPoolMaxTokens(runtime);
   let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
+  if (resolution.gap && runtime.consolidationInFlight) {
+    const settled = await waitForInFlightConsolidation(runtime, event.signal);
+    if (event.signal?.aborted) return { cancel: true };
+    debugLog("compaction.in_flight_wait", { settled });
+    if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
+    entries = ctx.sessionManager.getBranch();
+    resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
+  }
   if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !runtime.consolidationInFlight) {
     const catchUp = await catchUpObserver({ pi, runtime, ctx, entries, gap: resolution.gap, resolved, maxChunks: runtime.config.compactionCatchUpMaxChunks, signal: event.signal });
     if (event.signal?.aborted) return { cancel: true };

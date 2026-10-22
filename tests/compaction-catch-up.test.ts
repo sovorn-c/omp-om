@@ -7,7 +7,7 @@ vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
 	runObserver: mockAgents.runObserver,
 }));
 
-import { HOOK_CATCH_UP_DEADLINE_MS, registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import { HOOK_CATCH_UP_DEADLINE_MS, HOOK_IN_FLIGHT_WAIT_MS, registerCompactionHook } from "../src/hooks/compaction-hook.js";
 import { OM_OBSERVATIONS_RECORDED } from "../src/session-ledger/index.js";
 import { compactionEntry, observation, observationsRecordedEntry, rawMessage, resetBoundary, type TestEntry } from "./fixtures/session.js";
 
@@ -53,7 +53,8 @@ function setup(args: {
 	entries: TestEntry[];
 	maxChunks?: number;
 	observerChunkMaxTokens?: number;
-	consolidationInFlight?: boolean;
+	/** A background consolidation still running when compaction starts; setup assigns `finish` to settle it. */
+	inFlight?: { finish: () => void };
 	resolveOk?: boolean;
 	signal?: AbortSignal;
 	ensureConfigError?: Error;
@@ -86,7 +87,8 @@ function setup(args: {
 			model: "@smol",
 		},
 		compactHookInFlight: false,
-		consolidationInFlight: args.consolidationInFlight ?? false,
+		consolidationInFlight: false,
+		consolidationPromise: null as Promise<void> | null,
 		resolveModel: vi.fn(async () => (args.resolveOk === false
 			? { ok: false, reason: "no model" }
 			: { ok: true, model: { provider: "gtr7", id: "memory", contextWindow: 65536 }, apiKey: "key" })),
@@ -94,6 +96,17 @@ function setup(args: {
 			if (args.ensureConfigError) throw args.ensureConfigError;
 		}),
 	};
+	if (args.inFlight) {
+		const inFlight = args.inFlight;
+		runtime.consolidationInFlight = true;
+		runtime.consolidationPromise = new Promise<void>((resolve) => {
+			inFlight.finish = () => {
+				runtime.consolidationInFlight = false;
+				runtime.consolidationPromise = null;
+				resolve();
+			};
+		});
+	}
 	registerCompactionHook(pi as any, runtime as any);
 	if (!handler) throw new Error("compaction handler was not registered");
 	const ctx = {
@@ -111,7 +124,7 @@ function setup(args: {
 		willRetry: false,
 		signal: args.signal ?? new AbortController().signal,
 	}, ctx);
-	return { pi, runtime, ctx, run, getEntries: () => entries };
+	return { pi, runtime, ctx, run, getEntries: () => entries, setEntries: (next: TestEntry[]) => { entries = next; } };
 }
 
 beforeEach(() => {
@@ -210,12 +223,48 @@ describe("compaction hook synchronous catch-up", () => {
 		expect(result.compaction.firstKeptEntryId).toBe("a1");
 	});
 
-	it("does not run while a background consolidation is in flight", async () => {
-		const { run, runtime } = setup({ entries: laggingBranch(), consolidationInFlight: true });
+	it("waits for an in-flight consolidation whose observations cover the gap, then cuts at Pi's boundary", async () => {
+		const inFlight = { finish: () => {} };
+		const { run, getEntries, setEntries } = setup({ entries: laggingBranch(), inFlight });
 
-		const result = await run("u2") as any;
+		const pending = run("u2");
+		await Promise.resolve();
+		setEntries([...getEntries(), coverage("om-a2", "a2", "cccccccccccc")]);
+		inFlight.finish();
+		const result = await pending as any;
+
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.summary).not.toContain("model-free");
+		expect(result.compaction.details.observations.map((obs: any) => obs.id)).toContain("cccccccccccc");
+	});
+
+	it("catches up the gap an in-flight consolidation left unobserved once it finishes", async () => {
+		const gapObs = observation("cccccccccccc", { sourceEntryIds: ["t1", "a2"], tokenCount: 12 });
+		mockAgents.runObserver.mockResolvedValueOnce([gapObs]);
+		const inFlight = { finish: () => {} };
+		const { run } = setup({ entries: laggingBranch(), inFlight });
+
+		const pending = run("u2");
+		await Promise.resolve();
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
+		inFlight.finish();
+		const result = await pending as any;
+
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+	});
+
+	it("retains the tail without catch-up when the in-flight consolidation outlasts the wait", async () => {
+		vi.useFakeTimers();
+		const { run, runtime } = setup({ entries: laggingBranch(), inFlight: { finish: () => {} } });
+
+		const pending = run("u2");
+		await vi.advanceTimersByTimeAsync(HOOK_IN_FLIGHT_WAIT_MS);
+		const result = await pending as any;
 
 		expect(runtime.resolveModel).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runObserver).not.toHaveBeenCalled();
 		expect(result.compaction.firstKeptEntryId).toBe("a1");
 	});
 

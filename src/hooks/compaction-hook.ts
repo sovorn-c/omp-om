@@ -31,6 +31,28 @@ import {
 /** Bound hook work below omp's 30s handler timeout so native fallback can run. */
 export const HOOK_CATCH_UP_DEADLINE_MS = 20_000;
 
+/** Longest the hook waits for a background consolidation, leaving the rest of the deadline for catch-up. */
+export const HOOK_IN_FLIGHT_WAIT_MS = 8_000;
+
+/** Wait for the in-flight consolidation to settle; false on timeout or abort. */
+async function waitForInFlightConsolidation(runtime: Runtime, signal: AbortSignal | undefined): Promise<boolean> {
+	const pending = runtime.consolidationPromise;
+	if (!runtime.consolidationInFlight || !pending) return !runtime.consolidationInFlight;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let onAbort: (() => void) | undefined;
+	const stopped = new Promise<false>((resolve) => {
+		timer = setTimeout(() => resolve(false), HOOK_IN_FLIGHT_WAIT_MS);
+		onAbort = () => resolve(false);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([pending.then(() => true, () => true), stopped]);
+	} finally {
+		clearTimeout(timer);
+		if (onAbort) signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 const DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 20_000;
 
 function observationsPoolMaxTokens(runtime: Runtime): number {
@@ -229,6 +251,17 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 	const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
 	const poolMaxTokens = observationsPoolMaxTokens(runtime);
 	let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
+
+	// A background observer run may already be covering the gap. Its result
+	// lands on the branch, so wait (bounded) and re-resolve the cut against it.
+	if (resolution.gap && runtime.consolidationInFlight) {
+		const settled = await waitForInFlightConsolidation(runtime, event.signal);
+		if (event.signal?.aborted) return { cancel: true };
+		debugLog("compaction.in_flight_wait", { settled });
+		if (runtime.memoryFailureReason) return delegateCompaction(ctx, runtime, runtime.memoryFailureReason);
+		entries = ctx.sessionManager.getBranch() as Entry[];
+		resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens });
+	}
 
 	// The background observer is behind Pi's cut. Rather than retaining the
 	// tail or compacting blind, observe the gap now: Pi waits for this hook,

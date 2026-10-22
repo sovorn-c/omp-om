@@ -141,7 +141,7 @@ Subagent sessions never run the background workers; only the main session's ledg
 When omp compacts, omp-om decides in this order:
 
 1. **Memory model unhealthy** (can't resolve, can't authenticate, request failed, 20 second deadline hit): warn and let omp's normal summarizer run.
-2. **Ledger behind omp's cut:** the observer catches up, up to `compactionCatchUpMaxChunks` chunks. If the remaining tail fits, the cut moves back to keep it in context.
+2. **Ledger behind omp's cut:** if a background observer run is already in progress, wait for it (up to 8 seconds), then the observer catches up the rest, up to `compactionCatchUpMaxChunks` chunks. If the remaining tail fits, the cut moves back to keep it in context.
 3. **Tail or summary doesn't fit the budget:** omp-om writes a deterministic summary from the ledger that fits plus excerpts of the unobserved input.
 4. **Cancellation:** a user abort cancels compaction. A second compaction while one is running is cancelled as a duplicate.
 
